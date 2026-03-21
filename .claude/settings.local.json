@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(cargo search:*)",
+      "WebFetch(domain:docs.rs)",
+      "WebSearch",
+      "Bash(capnp --version)",
+      "Bash(lein version:*)",
+      "Bash(java -version)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(CLASSPATH= lein deps)",
+      "Bash(CLASSPATH= lein compile)",
+      "Bash(CLASSPATH= lein run test --barka-bin /home/miles/proj/barka/target/debug/barka 2>&1)"
+    ]
+  }
+}

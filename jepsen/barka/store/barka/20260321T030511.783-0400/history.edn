@@ -1,0 +1,310 @@
+{:index 0, :time 6931240, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 1, :time 13730343, :type :fail, :process 0, :f :dequeue, :value nil, :error :empty}
+{:index 2, :time 21283964, :type :invoke, :process 1, :f :enqueue, :value 7573}
+{:index 3, :time 22331909, :type :ok, :process 1, :f :enqueue, :value 7573, :offset 0}
+{:index 4, :time 198110170, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 5, :time 198813410, :type :ok, :process 2, :f :dequeue, :value "7573"}
+{:index 6, :time 287027320, :type :invoke, :process 3, :f :enqueue, :value 4703}
+{:index 7, :time 287683841, :type :ok, :process 3, :f :enqueue, :value 4703, :offset 1}
+{:index 8, :time 451457435, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 9, :time 452205514, :type :ok, :process 4, :f :dequeue, :value "7573"}
+{:index 10, :time 509574379, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 11, :time 510434207, :type :ok, :process 0, :f :dequeue, :value "7573"}
+{:index 12, :time 682567850, :type :invoke, :process 0, :f :enqueue, :value 6408}
+{:index 13, :time 683390969, :type :ok, :process 0, :f :enqueue, :value 6408, :offset 2}
+{:index 14, :time 701488668, :type :invoke, :process 1, :f :enqueue, :value 6628}
+{:index 15, :time 702113569, :type :ok, :process 1, :f :enqueue, :value 6628, :offset 3}
+{:index 16, :time 864221327, :type :invoke, :process 2, :f :enqueue, :value 2677}
+{:index 17, :time 865134334, :type :ok, :process 2, :f :enqueue, :value 2677, :offset 4}
+{:index 18, :time 874441720, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 19, :time 874972792, :type :ok, :process 3, :f :dequeue, :value "7573"}
+{:index 20, :time 895176612, :type :invoke, :process 4, :f :enqueue, :value 5224}
+{:index 21, :time 895555136, :type :ok, :process 4, :f :enqueue, :value 5224, :offset 5}
+{:index 22, :time 1085161408, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 23, :time 1086066185, :type :ok, :process 0, :f :dequeue, :value "4703"}
+{:index 24, :time 1285091411, :type :invoke, :process 0, :f :enqueue, :value 845}
+{:index 25, :time 1285903199, :type :ok, :process 0, :f :enqueue, :value 845, :offset 6}
+{:index 26, :time 1301158370, :type :invoke, :process 1, :f :enqueue, :value 6956}
+{:index 27, :time 1301641273, :type :ok, :process 1, :f :enqueue, :value 6956, :offset 7}
+{:index 28, :time 1367467296, :type :invoke, :process 2, :f :enqueue, :value 295}
+{:index 29, :time 1368247165, :type :ok, :process 2, :f :enqueue, :value 295, :offset 8}
+{:index 30, :time 1484399514, :type :invoke, :process 3, :f :enqueue, :value 1244}
+{:index 31, :time 1485124063, :type :ok, :process 3, :f :enqueue, :value 1244, :offset 9}
+{:index 32, :time 1673464224, :type :invoke, :process 4, :f :enqueue, :value 619}
+{:index 33, :time 1673964996, :type :ok, :process 4, :f :enqueue, :value 619, :offset 10}
+{:index 34, :time 1816004073, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 35, :time 1816942959, :type :ok, :process 0, :f :dequeue, :value "6408"}
+{:index 36, :time 1861755905, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 37, :time 1862404335, :type :ok, :process 0, :f :dequeue, :value "6628"}
+{:index 38, :time 1971356468, :type :invoke, :process 1, :f :enqueue, :value 3843}
+{:index 39, :time 1972205016, :type :ok, :process 1, :f :enqueue, :value 3843, :offset 11}
+{:index 40, :time 2064864953, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 41, :time 2065689571, :type :ok, :process 2, :f :dequeue, :value "4703"}
+{:index 42, :time 2177460943, :type :invoke, :process 3, :f :enqueue, :value 9139}
+{:index 43, :time 2178301241, :type :ok, :process 3, :f :enqueue, :value 9139, :offset 12}
+{:index 44, :time 2310742435, :type :invoke, :process 4, :f :enqueue, :value 9151}
+{:index 45, :time 2311296337, :type :ok, :process 4, :f :enqueue, :value 9151, :offset 13}
+{:index 46, :time 2362546140, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 47, :time 2363297829, :type :ok, :process 0, :f :dequeue, :value "2677"}
+{:index 48, :time 2542706368, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 49, :time 2543440247, :type :ok, :process 0, :f :dequeue, :value "5224"}
+{:index 50, :time 2690797027, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 51, :time 2691597736, :type :ok, :process 1, :f :dequeue, :value "7573"}
+{:index 52, :time 2701711650, :type :invoke, :process 2, :f :enqueue, :value 2502}
+{:index 53, :time 2702294582, :type :ok, :process 2, :f :enqueue, :value 2502, :offset 14}
+{:index 54, :time 2768043686, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 55, :time 2768883634, :type :ok, :process 3, :f :dequeue, :value "4703"}
+{:index 56, :time 2934478682, :type :invoke, :process 4, :f :enqueue, :value 4889}
+{:index 57, :time 2935066923, :type :ok, :process 4, :f :enqueue, :value 4889, :offset 15}
+{:index 58, :time 3017402559, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 59, :time 3018156138, :type :ok, :process 0, :f :dequeue, :value "845"}
+{:index 60, :time 3050918636, :type :invoke, :process 0, :f :enqueue, :value 4472}
+{:index 61, :time 3051449609, :type :ok, :process 0, :f :enqueue, :value 4472, :offset 16}
+{:index 62, :time 3141554832, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 63, :time 3142388000, :type :ok, :process 1, :f :dequeue, :value "4703"}
+{:index 64, :time 3317905275, :type :invoke, :process 2, :f :enqueue, :value 2492}
+{:index 65, :time 3318810262, :type :ok, :process 2, :f :enqueue, :value 2492, :offset 17}
+{:index 66, :time 3436712596, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 67, :time 3437508315, :type :ok, :process 3, :f :dequeue, :value "6408"}
+{:index 68, :time 3488022768, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 69, :time 3488539740, :type :ok, :process 4, :f :dequeue, :value "4703"}
+{:index 70, :time 3629079129, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 71, :time 3629903797, :type :ok, :process 0, :f :dequeue, :value "6956"}
+{:index 72, :time 3737768985, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 73, :time 3738491245, :type :ok, :process 0, :f :dequeue, :value "295"}
+{:index 74, :time 3770047200, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 75, :time 3770905598, :type :ok, :process 1, :f :dequeue, :value "6408"}
+{:index 76, :time 3835167874, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 77, :time 3835955842, :type :ok, :process 2, :f :dequeue, :value "6408"}
+{:index 78, :time 3896493821, :type :invoke, :process 3, :f :enqueue, :value 3500}
+{:index 79, :time 3897248210, :type :ok, :process 3, :f :enqueue, :value 3500, :offset 18}
+{:index 80, :time 4087693121, :type :invoke, :process 4, :f :enqueue, :value 9867}
+{:index 81, :time 4088317692, :type :ok, :process 4, :f :enqueue, :value 9867, :offset 19}
+{:index 82, :time 4214617655, :type :invoke, :process 0, :f :enqueue, :value 3232}
+{:index 83, :time 4215231296, :type :ok, :process 0, :f :enqueue, :value 3232, :offset 20}
+{:index 84, :time 4230551005, :type :invoke, :process 0, :f :enqueue, :value 9504}
+{:index 85, :time 4230939210, :type :ok, :process 0, :f :enqueue, :value 9504, :offset 21}
+{:index 86, :time 4310768721, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 87, :time 4311550400, :type :ok, :process 1, :f :dequeue, :value "6628"}
+{:index 88, :time 4437155823, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 89, :time 4437893862, :type :ok, :process 2, :f :dequeue, :value "6628"}
+{:index 90, :time 4466168366, :type :invoke, :process 3, :f :enqueue, :value 5748}
+{:index 91, :time 4466765147, :type :ok, :process 3, :f :enqueue, :value 5748, :offset 22}
+{:index 92, :time 4582066368, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 93, :time 4582558061, :type :ok, :process 4, :f :dequeue, :value "6408"}
+{:index 94, :time 4758023597, :type :invoke, :process 0, :f :enqueue, :value 7605}
+{:index 95, :time 4758728377, :type :ok, :process 0, :f :enqueue, :value 7605, :offset 23}
+{:index 96, :time 4848765681, :type :invoke, :process 0, :f :enqueue, :value 100}
+{:index 97, :time 4849449101, :type :ok, :process 0, :f :enqueue, :value 100, :offset 24}
+{:index 98, :time 5003096831, :type :invoke, :process 1, :f :enqueue, :value 7254}
+{:index 99, :time 5003740921, :type :ok, :process 1, :f :enqueue, :value 7254, :offset 25}
+{:index 100, :time 5148551688, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 101, :time 5149344617, :type :ok, :process 2, :f :dequeue, :value "2677"}
+{:index 102, :time 5290232450, :type :invoke, :process 3, :f :enqueue, :value 210}
+{:index 103, :time 5290955839, :type :ok, :process 3, :f :enqueue, :value 210, :offset 26}
+{:index 104, :time 5420013743, :type :invoke, :process 4, :f :enqueue, :value 3998}
+{:index 105, :time 5420529095, :type :ok, :process 4, :f :enqueue, :value 3998, :offset 27}
+{:index 106, :time 5424615547, :type :invoke, :process 0, :f :enqueue, :value 8314}
+{:index 107, :time 5425206148, :type :ok, :process 0, :f :enqueue, :value 8314, :offset 28}
+{:index 108, :time 5517862115, :type :invoke, :process 0, :f :enqueue, :value 5197}
+{:index 109, :time 5518546455, :type :ok, :process 0, :f :enqueue, :value 5197, :offset 29}
+{:index 110, :time 5649551600, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 111, :time 5650276730, :type :ok, :process 1, :f :dequeue, :value "2677"}
+{:index 112, :time 5840207197, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 113, :time 5840923407, :type :ok, :process 2, :f :dequeue, :value "5224"}
+{:index 114, :time 5906448805, :type :invoke, :process 3, :f :enqueue, :value 5308}
+{:index 115, :time 5907118215, :type :ok, :process 3, :f :enqueue, :value 5308, :offset 30}
+{:index 116, :time 6027918187, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 117, :time 6028489249, :type :ok, :process 4, :f :dequeue, :value "6628"}
+{:index 118, :time 6061661091, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 119, :time 6062437220, :type :ok, :process 0, :f :dequeue, :value "1244"}
+{:index 120, :time 6120732642, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 121, :time 6121455871, :type :ok, :process 0, :f :dequeue, :value "619"}
+{:index 122, :time 6298675342, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 123, :time 6299390531, :type :ok, :process 1, :f :dequeue, :value "5224"}
+{:index 124, :time 6326620970, :type :invoke, :process 2, :f :enqueue, :value 8800}
+{:index 125, :time 6327110003, :type :ok, :process 2, :f :enqueue, :value 8800, :offset 31}
+{:index 126, :time 6505983979, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 127, :time 6506634690, :type :ok, :process 3, :f :dequeue, :value "6628"}
+{:index 128, :time 6550434450, :type :invoke, :process 4, :f :enqueue, :value 7232}
+{:index 129, :time 6550868053, :type :ok, :process 4, :f :enqueue, :value 7232, :offset 32}
+{:index 130, :time 6749064112, :type :invoke, :process 0, :f :enqueue, :value 3485}
+{:index 131, :time 6749682893, :type :ok, :process 0, :f :enqueue, :value 3485, :offset 33}
+{:index 132, :time 6855653018, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 133, :time 6856351028, :type :ok, :process 0, :f :dequeue, :value "3843"}
+{:index 134, :time 6870355967, :type :invoke, :process 1, :f :enqueue, :value 9236}
+{:index 135, :time 6870744151, :type :ok, :process 1, :f :enqueue, :value 9236, :offset 34}
+{:index 136, :time 6916336315, :type :invoke, :process 2, :f :enqueue, :value 2831}
+{:index 137, :time 6916750359, :type :ok, :process 2, :f :enqueue, :value 2831, :offset 35}
+{:index 138, :time 6928187365, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 139, :time 6928625149, :type :ok, :process 3, :f :dequeue, :value "2677"}
+{:index 140, :time 7058057237, :type :invoke, :process 4, :f :enqueue, :value 9524}
+{:index 141, :time 7058497640, :type :ok, :process 4, :f :enqueue, :value 9524, :offset 36}
+{:index 142, :time 7181472791, :type :invoke, :process 0, :f :enqueue, :value 9156}
+{:index 143, :time 7182203360, :type :ok, :process 0, :f :enqueue, :value 9156, :offset 37}
+{:index 144, :time 7294607533, :type :invoke, :process 0, :f :enqueue, :value 4469}
+{:index 145, :time 7295185075, :type :ok, :process 0, :f :enqueue, :value 4469, :offset 38}
+{:index 146, :time 7323217152, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 147, :time 7323602506, :type :ok, :process 1, :f :dequeue, :value "845"}
+{:index 148, :time 7367644233, :type :invoke, :process 2, :f :enqueue, :value 7687}
+{:index 149, :time 7368194515, :type :ok, :process 2, :f :enqueue, :value 7687, :offset 39}
+{:index 150, :time 7558228501, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 151, :time 7558965910, :type :ok, :process 3, :f :dequeue, :value "5224"}
+{:index 152, :time 7756589317, :type :invoke, :process 4, :f :enqueue, :value 8483}
+{:index 153, :time 7757108370, :type :ok, :process 4, :f :enqueue, :value 8483, :offset 40}
+{:index 154, :time 7883054618, :type :invoke, :process 0, :f :enqueue, :value 4376}
+{:index 155, :time 7883688889, :type :ok, :process 0, :f :enqueue, :value 4376, :offset 41}
+{:index 156, :time 7957060923, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 157, :time 7957750503, :type :ok, :process 0, :f :dequeue, :value "9139"}
+{:index 158, :time 8131103819, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 159, :time 8131741920, :type :ok, :process 1, :f :dequeue, :value "6956"}
+{:index 160, :time 8203505617, :type :invoke, :process 2, :f :enqueue, :value 3354}
+{:index 161, :time 8203922501, :type :ok, :process 2, :f :enqueue, :value 3354, :offset 42}
+{:index 162, :time 8257454801, :type :invoke, :process 3, :f :enqueue, :value 6925}
+{:index 163, :time 8258097362, :type :ok, :process 3, :f :enqueue, :value 6925, :offset 43}
+{:index 164, :time 8288347307, :type :invoke, :process 4, :f :enqueue, :value 9391}
+{:index 165, :time 8288635223, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 166, :time 8288772391, :type :ok, :process 4, :f :enqueue, :value 9391, :offset 44}
+{:index 167, :time 8289197354, :type :ok, :process 0, :f :dequeue, :value "9151"}
+{:index 168, :time 8456782344, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 169, :time 8456967971, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 170, :time 8457476143, :type :ok, :process 0, :f :dequeue, :value "2502"}
+{:index 171, :time 8457510313, :type :ok, :process 1, :f :dequeue, :value "295"}
+{:index 172, :time 8544292604, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 173, :time 8545309010, :type :ok, :process 2, :f :dequeue, :value "845"}
+{:index 174, :time 8597228393, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 175, :time 8597969402, :type :ok, :process 3, :f :dequeue, :value "845"}
+{:index 176, :time 8705951399, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 177, :time 8706446412, :type :ok, :process 4, :f :dequeue, :value "2677"}
+{:index 178, :time 8893036327, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 179, :time 8893598639, :type :ok, :process 0, :f :dequeue, :value "4889"}
+{:index 180, :time 8984189326, :type :invoke, :process 0, :f :enqueue, :value 4223}
+{:index 181, :time 8984782057, :type :ok, :process 0, :f :enqueue, :value 4223, :offset 45}
+{:index 182, :time 9095098700, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 183, :time 9095721001, :type :ok, :process 1, :f :dequeue, :value "1244"}
+{:index 184, :time 9185788085, :type :invoke, :process 2, :f :enqueue, :value 8243}
+{:index 185, :time 9186221329, :type :ok, :process 2, :f :enqueue, :value 8243, :offset 46}
+{:index 186, :time 9194924964, :type :invoke, :process 3, :f :enqueue, :value 381}
+{:index 187, :time 9195251109, :type :ok, :process 3, :f :enqueue, :value 381, :offset 47}
+{:index 188, :time 9286982720, :type :invoke, :process 4, :f :enqueue, :value 8309}
+{:index 189, :time 9287405933, :type :ok, :process 4, :f :enqueue, :value 8309, :offset 48}
+{:index 190, :time 9417447993, :type :invoke, :process 0, :f :enqueue, :value 2143}
+{:index 191, :time 9418139433, :type :ok, :process 0, :f :enqueue, :value 2143, :offset 49}
+{:index 192, :time 9452853073, :type :invoke, :process 0, :f :enqueue, :value 2513}
+{:index 193, :time 9453209588, :type :ok, :process 0, :f :enqueue, :value 2513, :offset 50}
+{:index 194, :time 9496525425, :type :invoke, :process 1, :f :enqueue, :value 7843}
+{:index 195, :time 9497078747, :type :ok, :process 1, :f :enqueue, :value 7843, :offset 51}
+{:index 196, :time 9522431202, :type :invoke, :process 2, :f :enqueue, :value 8764}
+{:index 197, :time 9522808207, :type :ok, :process 2, :f :enqueue, :value 8764, :offset 52}
+{:index 198, :time 9550647656, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 199, :time 9551154419, :type :ok, :process 3, :f :dequeue, :value "6956"}
+{:index 200, :time 9577012457, :type :invoke, :process 4, :f :enqueue, :value 5424}
+{:index 201, :time 9577448691, :type :ok, :process 4, :f :enqueue, :value 5424, :offset 53}
+{:index 202, :time 9628403008, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 203, :time 9629033199, :type :ok, :process 0, :f :dequeue, :value "4472"}
+{:index 204, :time 9828317722, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 205, :time 9828939583, :type :ok, :process 0, :f :dequeue, :value "2492"}
+{:index 206, :time 9924191572, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 207, :time 9924792674, :type :ok, :process 1, :f :dequeue, :value "619"}
+{:index 208, :time 9925004571, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 209, :time 9925372155, :type :ok, :process 3, :f :dequeue, :value "295"}
+{:index 210, :time 10063457619, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 211, :time 10063887723, :type :ok, :process 4, :f :dequeue, :value "5224"}
+{:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}
+{:index 213, :time 10250890072, :type :info, :process :nemesis, :f :dequeue, :value nil, :exception {:via [{:type clojure.lang.ExceptionInfo, :message "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}, :at [slingshot.support$stack_trace invoke "support.clj" 201]}], :trace [[slingshot.support$stack_trace invoke "support.clj" 201] [jepsen.nemesis.Validate invoke_BANG_ "nemesis.clj" 78] [jepsen.generator.interpreter.NemesisWorker invoke_BANG_ "interpreter.clj" 77] [jepsen.generator.interpreter$spawn_worker$fn__13742$fn__13743 invoke "interpreter.clj" 140] [jepsen.generator.interpreter$spawn_worker$fn__13742 invoke "interpreter.clj" 123] [clojure.core$binding_conveyor_fn$fn__5823 invoke "core.clj" 2047] [clojure.lang.AFn call "AFn.java" 18] [java.util.concurrent.FutureTask run "FutureTask.java" 317] [java.util.concurrent.ThreadPoolExecutor runWorker "ThreadPoolExecutor.java" 1144] [java.util.concurrent.ThreadPoolExecutor$Worker run "ThreadPoolExecutor.java" 642] [java.lang.Thread run "Thread.java" 1583]], :cause "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}}, :error "indeterminate: throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 212, :time 10247300544, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}"}
+{:index 214, :time 10258236806, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 215, :time 10258682690, :type :ok, :process 0, :f :dequeue, :value "3500"}
+{:index 216, :time 10366994702, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 217, :time 10367606113, :type :ok, :process 1, :f :dequeue, :value "3843"}
+{:index 218, :time 10420483552, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 219, :time 10421080964, :type :ok, :process 2, :f :dequeue, :value "6956"}
+{:index 220, :time 10595206269, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 221, :time 10595781950, :type :ok, :process 3, :f :dequeue, :value "1244"}
+{:index 222, :time 10788419479, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 223, :time 10788784784, :type :ok, :process 4, :f :dequeue, :value "845"}
+{:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}
+{:index 225, :time 10880185709, :type :info, :process :nemesis, :f :dequeue, :value nil, :exception {:via [{:type clojure.lang.ExceptionInfo, :message "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}, :at [slingshot.support$stack_trace invoke "support.clj" 201]}], :trace [[slingshot.support$stack_trace invoke "support.clj" 201] [jepsen.nemesis.Validate invoke_BANG_ "nemesis.clj" 78] [jepsen.generator.interpreter.NemesisWorker invoke_BANG_ "interpreter.clj" 77] [jepsen.generator.interpreter$spawn_worker$fn__13742$fn__13743 invoke "interpreter.clj" 140] [jepsen.generator.interpreter$spawn_worker$fn__13742 invoke "interpreter.clj" 123] [clojure.core$binding_conveyor_fn$fn__5823 invoke "core.clj" 2047] [clojure.lang.AFn call "AFn.java" 18] [java.util.concurrent.FutureTask run "FutureTask.java" 317] [java.util.concurrent.ThreadPoolExecutor runWorker "ThreadPoolExecutor.java" 1144] [java.util.concurrent.ThreadPoolExecutor$Worker run "ThreadPoolExecutor.java" 642] [java.lang.Thread run "Thread.java" 1583]], :cause "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}}, :error "indeterminate: throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 224, :time 10879651566, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}"}
+{:index 226, :time 11039672734, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 227, :time 11040219106, :type :ok, :process 0, :f :dequeue, :value "9867"}
+{:index 228, :time 11080936490, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 229, :time 11081453213, :type :ok, :process 1, :f :dequeue, :value "9139"}
+{:index 230, :time 11195121428, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 231, :time 11195768308, :type :ok, :process 2, :f :dequeue, :value "295"}
+{:index 232, :time 11322446996, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 233, :time 11323066587, :type :ok, :process 3, :f :dequeue, :value "619"}
+{:index 234, :time 11482668781, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 235, :time 11483056505, :type :ok, :process 4, :f :dequeue, :value "6956"}
+{:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}
+{:index 237, :time 11618115272, :type :info, :process :nemesis, :f :dequeue, :value nil, :exception {:via [{:type clojure.lang.ExceptionInfo, :message "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}, :at [slingshot.support$stack_trace invoke "support.clj" 201]}], :trace [[slingshot.support$stack_trace invoke "support.clj" 201] [jepsen.nemesis.Validate invoke_BANG_ "nemesis.clj" 78] [jepsen.generator.interpreter.NemesisWorker invoke_BANG_ "interpreter.clj" 77] [jepsen.generator.interpreter$spawn_worker$fn__13742$fn__13743 invoke "interpreter.clj" 140] [jepsen.generator.interpreter$spawn_worker$fn__13742 invoke "interpreter.clj" 123] [clojure.core$binding_conveyor_fn$fn__5823 invoke "core.clj" 2047] [clojure.lang.AFn call "AFn.java" 18] [java.util.concurrent.FutureTask run "FutureTask.java" 317] [java.util.concurrent.ThreadPoolExecutor runWorker "ThreadPoolExecutor.java" 1144] [java.util.concurrent.ThreadPoolExecutor$Worker run "ThreadPoolExecutor.java" 642] [java.lang.Thread run "Thread.java" 1583]], :cause "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}}, :error "indeterminate: throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 236, :time 11617500071, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}"}
+{:index 238, :time 11771082131, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 239, :time 11771705282, :type :ok, :process 0, :f :dequeue, :value "3232"}
+{:index 240, :time 11882728375, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 241, :time 11883419845, :type :ok, :process 1, :f :dequeue, :value "9151"}
+{:index 242, :time 11977951035, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 243, :time 11978545436, :type :ok, :process 2, :f :dequeue, :value "1244"}
+{:index 244, :time 12173781418, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 245, :time 12174383559, :type :ok, :process 3, :f :dequeue, :value "3843"}
+{:index 246, :time 12186002052, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 247, :time 12186469015, :type :ok, :process 4, :f :dequeue, :value "295"}
+{:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}
+{:index 249, :time 12311089902, :type :info, :process :nemesis, :f :dequeue, :value nil, :exception {:via [{:type clojure.lang.ExceptionInfo, :message "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}, :at [slingshot.support$stack_trace invoke "support.clj" 201]}], :trace [[slingshot.support$stack_trace invoke "support.clj" 201] [jepsen.nemesis.Validate invoke_BANG_ "nemesis.clj" 78] [jepsen.generator.interpreter.NemesisWorker invoke_BANG_ "interpreter.clj" 77] [jepsen.generator.interpreter$spawn_worker$fn__13742$fn__13743 invoke "interpreter.clj" 140] [jepsen.generator.interpreter$spawn_worker$fn__13742 invoke "interpreter.clj" 123] [clojure.core$binding_conveyor_fn$fn__5823 invoke "core.clj" 2047] [clojure.lang.AFn call "AFn.java" 18] [java.util.concurrent.FutureTask run "FutureTask.java" 317] [java.util.concurrent.ThreadPoolExecutor runWorker "ThreadPoolExecutor.java" 1144] [java.util.concurrent.ThreadPoolExecutor$Worker run "ThreadPoolExecutor.java" 642] [java.lang.Thread run "Thread.java" 1583]], :cause "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}}, :error "indeterminate: throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 248, :time 12310389522, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}"}
+{:index 250, :time 12348394375, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 251, :time 12349023366, :type :ok, :process 0, :f :dequeue, :value "9504"}
+{:index 252, :time 12406821425, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 253, :time 12407405976, :type :ok, :process 1, :f :dequeue, :value "2502"}
+{:index 254, :time 12476309135, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 255, :time 12476953846, :type :ok, :process 2, :f :dequeue, :value "619"}
+{:index 256, :time 12552118035, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 257, :time 12552713686, :type :ok, :process 3, :f :dequeue, :value "9139"}
+{:index 258, :time 12689341690, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 259, :time 12689646256, :type :ok, :process 4, :f :dequeue, :value "1244"}
+{:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}
+{:index 261, :time 12730710855, :type :info, :process :nemesis, :f :dequeue, :value nil, :exception {:via [{:type clojure.lang.ExceptionInfo, :message "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}, :at [slingshot.support$stack_trace invoke "support.clj" 201]}], :trace [[slingshot.support$stack_trace invoke "support.clj" 201] [jepsen.nemesis.Validate invoke_BANG_ "nemesis.clj" 78] [jepsen.generator.interpreter.NemesisWorker invoke_BANG_ "interpreter.clj" 77] [jepsen.generator.interpreter$spawn_worker$fn__13742$fn__13743 invoke "interpreter.clj" 140] [jepsen.generator.interpreter$spawn_worker$fn__13742 invoke "interpreter.clj" 123] [clojure.core$binding_conveyor_fn$fn__5823 invoke "core.clj" 2047] [clojure.lang.AFn call "AFn.java" 18] [java.util.concurrent.FutureTask run "FutureTask.java" 317] [java.util.concurrent.ThreadPoolExecutor runWorker "ThreadPoolExecutor.java" 1144] [java.util.concurrent.ThreadPoolExecutor$Worker run "ThreadPoolExecutor.java" 642] [java.lang.Thread run "Thread.java" 1583]], :cause "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}}, :error "indeterminate: throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 260, :time 12730120204, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}"}
+{:index 262, :time 12884451034, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 263, :time 12885097944, :type :ok, :process 0, :f :dequeue, :value "5748"}
+{:index 264, :time 13047859413, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 265, :time 13048565642, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 266, :time 13048709480, :type :ok, :process 1, :f :dequeue, :value "4889"}
+{:index 267, :time 13048966337, :type :ok, :process 2, :f :dequeue, :value "3843"}
+{:index 268, :time 13060167525, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 269, :time 13060508901, :type :ok, :process 3, :f :dequeue, :value "9151"}
+{:index 270, :time 13136474888, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 271, :time 13136759404, :type :ok, :process 4, :f :dequeue, :value "619"}
+{:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}
+{:index 273, :time 13295663068, :type :info, :process :nemesis, :f :dequeue, :value nil, :exception {:via [{:type clojure.lang.ExceptionInfo, :message "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}, :at [slingshot.support$stack_trace invoke "support.clj" 201]}], :trace [[slingshot.support$stack_trace invoke "support.clj" 201] [jepsen.nemesis.Validate invoke_BANG_ "nemesis.clj" 78] [jepsen.generator.interpreter.NemesisWorker invoke_BANG_ "interpreter.clj" 77] [jepsen.generator.interpreter$spawn_worker$fn__13742$fn__13743 invoke "interpreter.clj" 140] [jepsen.generator.interpreter$spawn_worker$fn__13742 invoke "interpreter.clj" 123] [clojure.core$binding_conveyor_fn$fn__5823 invoke "core.clj" 2047] [clojure.lang.AFn call "AFn.java" 18] [java.util.concurrent.FutureTask run "FutureTask.java" 317] [java.util.concurrent.ThreadPoolExecutor runWorker "ThreadPoolExecutor.java" 1144] [java.util.concurrent.ThreadPoolExecutor$Worker run "ThreadPoolExecutor.java" 642] [java.lang.Thread run "Thread.java" 1583]], :cause "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}}, :error "indeterminate: throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 272, :time 13295142205, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}"}
+{:index 274, :time 13340509732, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 275, :time 13340983266, :type :ok, :process 0, :f :dequeue, :value "7605"}
+{:index 276, :time 13384575178, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 277, :time 13384959263, :type :ok, :process 1, :f :dequeue, :value "4472"}
+{:index 278, :time 13455638276, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 279, :time 13456117169, :type :ok, :process 2, :f :dequeue, :value "9139"}
+{:index 280, :time 13532423851, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 281, :time 13532941424, :type :ok, :process 3, :f :dequeue, :value "2502"}
+{:index 282, :time 13602119869, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 283, :time 13602424224, :type :ok, :process 4, :f :dequeue, :value "3843"}
+{:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}
+{:index 285, :time 13730738998, :type :info, :process :nemesis, :f :dequeue, :value nil, :exception {:via [{:type clojure.lang.ExceptionInfo, :message "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}, :at [slingshot.support$stack_trace invoke "support.clj" 201]}], :trace [[slingshot.support$stack_trace invoke "support.clj" 201] [jepsen.nemesis.Validate invoke_BANG_ "nemesis.clj" 78] [jepsen.generator.interpreter.NemesisWorker invoke_BANG_ "interpreter.clj" 77] [jepsen.generator.interpreter$spawn_worker$fn__13742$fn__13743 invoke "interpreter.clj" 140] [jepsen.generator.interpreter$spawn_worker$fn__13742 invoke "interpreter.clj" 123] [clojure.core$binding_conveyor_fn$fn__5823 invoke "core.clj" 2047] [clojure.lang.AFn call "AFn.java" 18] [java.util.concurrent.FutureTask run "FutureTask.java" 317] [java.util.concurrent.ThreadPoolExecutor runWorker "ThreadPoolExecutor.java" 1144] [java.util.concurrent.ThreadPoolExecutor$Worker run "ThreadPoolExecutor.java" 642] [java.lang.Thread run "Thread.java" 1583]], :cause "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}}, :error "indeterminate: throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 284, :time 13730137187, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}"}
+{:index 286, :time 13747374549, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 287, :time 13747749553, :type :ok, :process 0, :f :dequeue, :value "100"}
+{:index 288, :time 13813775424, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 289, :time 13814272386, :type :ok, :process 1, :f :dequeue, :value "2492"}
+{:index 290, :time 13944333335, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 291, :time 13944872878, :type :ok, :process 2, :f :dequeue, :value "9151"}
+{:index 292, :time 14035782130, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 293, :time 14036261633, :type :ok, :process 3, :f :dequeue, :value "4889"}
+{:index 294, :time 14114925041, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 295, :time 14115233427, :type :ok, :process 4, :f :dequeue, :value "9139"}
+{:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}
+{:index 297, :time 14297787480, :type :info, :process :nemesis, :f :dequeue, :value nil, :exception {:via [{:type clojure.lang.ExceptionInfo, :message "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}, :at [slingshot.support$stack_trace invoke "support.clj" 201]}], :trace [[slingshot.support$stack_trace invoke "support.clj" 201] [jepsen.nemesis.Validate invoke_BANG_ "nemesis.clj" 78] [jepsen.generator.interpreter.NemesisWorker invoke_BANG_ "interpreter.clj" 77] [jepsen.generator.interpreter$spawn_worker$fn__13742$fn__13743 invoke "interpreter.clj" 140] [jepsen.generator.interpreter$spawn_worker$fn__13742 invoke "interpreter.clj" 123] [clojure.core$binding_conveyor_fn$fn__5823 invoke "core.clj" 2047] [clojure.lang.AFn call "AFn.java" 18] [java.util.concurrent.FutureTask run "FutureTask.java" 317] [java.util.concurrent.ThreadPoolExecutor runWorker "ThreadPoolExecutor.java" 1144] [java.util.concurrent.ThreadPoolExecutor$Worker run "ThreadPoolExecutor.java" 642] [java.lang.Thread run "Thread.java" 1583]], :cause "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}}, :error "indeterminate: throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 296, :time 14297209479, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}"}
+{:index 298, :time 14320513243, :type :invoke, :process 0, :f :dequeue, :value nil}
+{:index 299, :time 14320916708, :type :ok, :process 0, :f :dequeue, :value "7254"}
+{:index 300, :time 14512078388, :type :invoke, :process 1, :f :dequeue, :value nil}
+{:index 301, :time 14512542381, :type :ok, :process 1, :f :dequeue, :value "3500"}
+{:index 302, :time 14630055850, :type :invoke, :process 2, :f :dequeue, :value nil}
+{:index 303, :time 14630588722, :type :ok, :process 2, :f :dequeue, :value "2502"}
+{:index 304, :time 14702565197, :type :invoke, :process 3, :f :dequeue, :value nil}
+{:index 305, :time 14703060640, :type :ok, :process 3, :f :dequeue, :value "4472"}
+{:index 306, :time 14779275653, :type :invoke, :process 4, :f :dequeue, :value nil}
+{:index 307, :time 14779582119, :type :ok, :process 4, :f :dequeue, :value "9151"}
+{:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}
+{:index 309, :time 14782475647, :type :info, :process :nemesis, :f :dequeue, :value nil, :exception {:via [{:type clojure.lang.ExceptionInfo, :message "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}, :at [slingshot.support$stack_trace invoke "support.clj" 201]}], :trace [[slingshot.support$stack_trace invoke "support.clj" 201] [jepsen.nemesis.Validate invoke_BANG_ "nemesis.clj" 78] [jepsen.generator.interpreter.NemesisWorker invoke_BANG_ "interpreter.clj" 77] [jepsen.generator.interpreter$spawn_worker$fn__13742$fn__13743 invoke "interpreter.clj" 140] [jepsen.generator.interpreter$spawn_worker$fn__13742 invoke "interpreter.clj" 123] [clojure.core$binding_conveyor_fn$fn__5823 invoke "core.clj" 2047] [clojure.lang.AFn call "AFn.java" 18] [java.util.concurrent.FutureTask run "FutureTask.java" 317] [java.util.concurrent.ThreadPoolExecutor runWorker "ThreadPoolExecutor.java" 1144] [java.util.concurrent.ThreadPoolExecutor$Worker run "ThreadPoolExecutor.java" 642] [java.lang.Thread run "Thread.java" 1583]], :cause "throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}", :data {:type :jepsen.nemesis/invalid-completion, :op {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [":type should be :info"]}}, :error "indeterminate: throw+: {:type :jepsen.nemesis/invalid-completion, :op {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :op' {:index 308, :time 14782009254, :type :invoke, :process :nemesis, :f :dequeue, :value nil}, :problems [\":type should be :info\"]}"}
