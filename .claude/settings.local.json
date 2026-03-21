@@ -14,7 +14,14 @@
       "Bash(CLASSPATH= lein deps)",
       "Bash(CLASSPATH= lein compile)",
       "Bash(CLASSPATH= lein run test --barka-bin /home/miles/proj/barka/target/debug/barka 2>&1)",
-      "Bash(make jepsen:*)"
+      "Bash(make jepsen:*)",
+      "Bash(echo CONTAINER_ID=$CONTAINER_ID:-unset)",
+      "Bash(echo DISTROBOX=$DISTROBOX_ENTER_PATH:-unset)",
+      "Bash(command -v aws)",
+      "Bash(command -v minio)",
+      "Bash(docker info:*)",
+      "Bash(podman info:*)",
+      "Bash(make localstack:*)"
     ]
   }
 }
