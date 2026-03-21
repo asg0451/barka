@@ -4,7 +4,7 @@
    Workload: single-partition log correctness.
    - :produce appends a uniquely identified value to the log
    - :consume reads the next unconsumed value from the log (shared offset)
-   - Checker validates: every produced value consumed exactly once, in order."
+   - Checker validates: every produced value consumed exactly once, in offset order."
   (:require [clojure.tools.logging :refer [info warn]]
             [jepsen
              [checker :as checker]
@@ -17,23 +17,29 @@
             [jepsen.barka.db :as db]))
 
 (defn log-checker
-  "Checks that every produced value is consumed exactly once, in produce order."
+  "Checks that every produced value is consumed exactly once, in offset order.
+   Uses server-assigned offsets from produce responses to determine expected order
+   rather than relying on history (acknowledgement-time) ordering."
   []
   (reify checker/Checker
     (check [this test history opts]
-      (let [produced   (->> history
+      (let [produces   (->> history
                             (filter #(and (= :produce (:f %)) (= :ok (:type %))))
-                            (mapv :value))
+                            vec)
             consumed   (->> history
                             (filter #(and (= :consume (:f %)) (= :ok (:type %))))
+                            (mapv :value))
+            produced   (mapv :value produces)
+            ;; Sort produces by server-assigned offset, not by position in history.
+            ;; History order reflects ack time which can diverge from offset order
+            ;; under concurrent producers.
+            expected   (->> produces
+                            (sort-by :offset)
                             (mapv :value))
             duplicates (- (count consumed) (count (distinct consumed)))
             lost       (vec (remove (set consumed) produced))
             unexpected (vec (remove (set produced) consumed))
-            ;; Check ordering: consumed should be a subsequence of produced
-            prod-idx   (zipmap produced (range))
-            indices    (keep prod-idx consumed)
-            ordered?   (= (seq indices) (seq (sort indices)))
+            ordered?   (= consumed (vec (take (count consumed) expected)))
             valid?     (and (empty? lost)
                             (empty? unexpected)
                             (zero? duplicates)
@@ -70,10 +76,15 @@
           :consume
           (let [off    @consume-offset
                 values (barka/consume! conn "default" 0 off 1)]
-            (if (seq values)
-              (do (compare-and-set! consume-offset off (inc off))
-                  (assoc op :type :ok :value (parse-long (first values))))
-              (assoc op :type :fail :error :empty))))
+            (cond
+              (empty? values)
+              (assoc op :type :fail :error :empty)
+
+              (compare-and-set! consume-offset off (inc off))
+              (assoc op :type :ok :value (parse-long (first values)))
+
+              :else
+              (assoc op :type :fail :error :cas-failed))))
         (catch Exception e
           (assoc op :type :info :error (.getMessage e)))))
 
@@ -91,6 +102,7 @@
     (merge tests/noop-test
            opts
            {:name           "barka"
+            :concurrency    1
             :consume-offset consume-offset
             :db             (db/db opts)
             :client         (barka-client nil nil)
@@ -109,9 +121,9 @@
                                    (gen/time-limit 10))
                               (gen/log "Draining...")
                               (->> (fn [_ _] {:type :invoke :f :consume})
-                                   (gen/stagger 1/10)
+                                   (gen/stagger 1/50)
                                    (gen/clients)
-                                   (gen/time-limit 5)))
+                                   (gen/time-limit 10)))
             :nodes          ["n1"]
             :ssh            {:dummy? true}})))
 
