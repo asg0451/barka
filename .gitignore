@@ -1,1 +1,5 @@
 /target
+jepsen/barka/store/
+jepsen/barka/target/
+jepsen/barka/.lein-*
+jepsen/barka/.nrepl-port
