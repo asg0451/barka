@@ -117,7 +117,8 @@
 
 (def cli-opts
   [[nil "--barka-bin PATH" "Path to barka binary"
-    :default "barka"]])
+    :default "barka"]
+   [nil "--project-root PATH" "Root of the barka project (where docker-compose.yml lives)"]])
 
 (defn -main
   "CLI entry point."

@@ -16,6 +16,8 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+aws-sdk-s3 = "1"
+aws-config = "1"
 
 [build-dependencies]
 capnpc = "0.25"
