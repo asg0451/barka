@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    let config = NodeConfig::default();
+    let config = NodeConfig::from_env();
     let s3_config = S3Config::from_env();
 
     tracing::info!(

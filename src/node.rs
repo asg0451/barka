@@ -30,6 +30,28 @@ impl Default for NodeConfig {
     }
 }
 
+impl NodeConfig {
+    pub fn from_env() -> Self {
+        let node_id: u64 = std::env::var("BARKA_NODE_ID")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let rpc_port: u16 = std::env::var("BARKA_RPC_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(9292);
+        let control_port: u16 = std::env::var("BARKA_CONTROL_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(9293);
+        Self {
+            node_id,
+            rpc_addr: ([127, 0, 0, 1], rpc_port).into(),
+            control_addr: ([127, 0, 0, 1], control_port).into(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Node {
     pub config: NodeConfig,

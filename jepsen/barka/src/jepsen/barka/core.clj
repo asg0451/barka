@@ -61,7 +61,7 @@
   [conn consume-offset]
   (reify client/Client
     (open! [this test node]
-      (barka-client (barka/open "127.0.0.1" db/control-port)
+      (barka-client (barka/open "127.0.0.1" (db/control-port-for node))
                     (:consume-offset test)))
 
     (setup! [this test])
@@ -98,11 +98,13 @@
   "Constructs a Jepsen test map for barka."
   [opts]
   (reset! next-value 0)
-  (let [consume-offset (atom 0)]
+  (let [n              (get opts :num-nodes 1)
+        node-names     (mapv #(str "n" (inc %)) (range n))
+        consume-offset (atom 0)]
     (merge tests/noop-test
            opts
            {:name           "barka"
-            :concurrency    1
+            :concurrency    (max 1 n)
             :consume-offset consume-offset
             :db             (db/db opts)
             :client         (barka-client nil nil)
@@ -124,12 +126,16 @@
                                    (gen/stagger 1/50)
                                    (gen/clients)
                                    (gen/time-limit 10)))
-            :nodes          ["n1"]
+            :nodes          node-names
             :ssh            {:dummy? true}})))
 
 (def cli-opts
   [[nil "--barka-bin PATH" "Path to barka binary"
-    :default "barka"]])
+    :default "barka"]
+   [nil "--num-nodes NUM" "Number of barka nodes"
+    :default 1
+    :parse-fn parse-long
+    :validate [#(<= 1 % 10) "Must be between 1 and 10"]]])
 
 (defn -main
   "CLI entry point."

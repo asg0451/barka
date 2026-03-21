@@ -1,6 +1,9 @@
 (ns jepsen.barka.db
   "Database (system under test) lifecycle for barka.
-   Assumes LocalStack is already running (started via `make localstack`)."
+   Assumes LocalStack is already running (started via `make localstack`).
+
+   Multi-node: each node gets its own barka process on a unique port pair.
+   n1 → rpc 9292 / control 9293, n2 → rpc 9294 / control 9295, etc."
   (:require [clojure.tools.logging :refer [info warn]]
             [jepsen.db :as db])
   (:import (java.net Socket InetSocketAddress HttpURLConnection URL)))
@@ -9,13 +12,19 @@
   "Path to the barka binary. Override via :barka-bin in test opts."
   "barka")
 
-(def control-port
-  "Default control API port."
-  9293)
+(def base-rpc-port 9292)
+(def base-control-port 9293)
 
-(def rpc-port
-  "Default capnp-rpc port."
-  9292)
+(defn node-idx
+  "0-based index from node name, e.g. \"n1\" → 0, \"n2\" → 1."
+  [node]
+  (dec (parse-long (re-find #"\d+" node))))
+
+(defn rpc-port-for [node]
+  (+ base-rpc-port (* 2 (node-idx node))))
+
+(defn control-port-for [node]
+  (+ base-control-port (* 2 (node-idx node))))
 
 (def localstack-port
   "LocalStack gateway port."
@@ -59,31 +68,38 @@
 
 (defn db
   "Constructs a Jepsen db that manages barka.
-   Assumes LocalStack is already running (`make localstack`)."
+   Assumes LocalStack is already running (`make localstack`).
+   Starts one barka process per node, each on its own port pair."
   [opts]
-  (let [bin     (get opts :barka-bin barka-bin)
-        process (atom nil)]
+  (let [bin       (get opts :barka-bin barka-bin)
+        processes (atom {})]
     (reify db/DB
       (setup! [_ test node]
         (wait-for "localstack S3" localstack-s3-ready? 200 10)
-        (info "starting barka on" node "with S3 endpoint" localstack-endpoint)
-        (let [pb (ProcessBuilder. [bin])]
-          (doto (.environment pb)
-            (.put "AWS_ENDPOINT_URL" localstack-endpoint)
-            (.put "AWS_ACCESS_KEY_ID" "test")
-            (.put "AWS_SECRET_ACCESS_KEY" "test")
-            (.put "AWS_REGION" "us-east-1")
-            (.put "RUST_LOG" "info"))
-          (let [proc (.start pb)]
-            (reset! process proc)
-            (wait-for "barka control port"
-                      #(tcp-reachable? "127.0.0.1" control-port 100)
-                      100 50)
-            (info "barka ready on" node))))
+        (let [rpc-port  (rpc-port-for node)
+              ctrl-port (control-port-for node)
+              idx       (node-idx node)]
+          (info "starting barka" node "rpc=" rpc-port "control=" ctrl-port)
+          (let [pb (ProcessBuilder. [bin])]
+            (doto (.environment pb)
+              (.put "AWS_ENDPOINT_URL" localstack-endpoint)
+              (.put "AWS_ACCESS_KEY_ID" "test")
+              (.put "AWS_SECRET_ACCESS_KEY" "test")
+              (.put "AWS_REGION" "us-east-1")
+              (.put "RUST_LOG" "info")
+              (.put "BARKA_NODE_ID" (str idx))
+              (.put "BARKA_RPC_PORT" (str rpc-port))
+              (.put "BARKA_CONTROL_PORT" (str ctrl-port)))
+            (let [proc (.start pb)]
+              (swap! processes assoc node proc)
+              (wait-for (str "barka control port " node)
+                        #(tcp-reachable? "127.0.0.1" ctrl-port 100)
+                        100 50)
+              (info "barka ready on" node)))))
 
       (teardown! [_ test node]
         (info "stopping barka on" node)
-        (when-let [proc @process]
+        (when-let [proc (get @processes node)]
           (.destroyForcibly proc)
           (.waitFor proc)
-          (reset! process nil))))))
+          (swap! processes dissoc node))))))
