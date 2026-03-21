@@ -1,6 +1,5 @@
 use std::net::SocketAddr;
 use std::rc::Rc;
-use std::sync::Arc;
 
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 use futures::AsyncReadExt;
@@ -8,12 +7,14 @@ use tokio::net::TcpListener;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info};
 
-use crate::node::NodeInner;
+use crate::node::Node;
 use crate::rpc::barka_capnp::barka_svc;
 
-pub async fn serve_rpc(inner: Arc<NodeInner>, addr: SocketAddr) -> crate::error::Result<()> {
+pub async fn serve_rpc(node: Node, addr: SocketAddr) -> crate::error::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "capnp-rpc listening");
+
+    let client: barka_svc::Client = capnp_rpc::new_client(node);
 
     let local = tokio::task::LocalSet::new();
     local
@@ -27,7 +28,7 @@ pub async fn serve_rpc(inner: Arc<NodeInner>, addr: SocketAddr) -> crate::error:
                     }
                 };
                 info!(%remote, "capnp-rpc connection");
-                let inner = inner.clone();
+                let client = client.clone();
 
                 tokio::task::spawn_local(async move {
                     let stream = stream.compat();
@@ -38,9 +39,7 @@ pub async fn serve_rpc(inner: Arc<NodeInner>, addr: SocketAddr) -> crate::error:
                         rpc_twoparty_capnp::Side::Server,
                         Default::default(),
                     );
-                    let svc = BarkaSvcImpl { inner };
-                    let client: barka_svc::Client = capnp_rpc::new_client(svc);
-                    let rpc = RpcSystem::new(Box::new(network), Some(client.clone().client));
+                    let rpc = RpcSystem::new(Box::new(network), Some(client.client));
                     if let Err(e) = rpc.await {
                         error!(%e, "rpc session error");
                     }
@@ -51,11 +50,7 @@ pub async fn serve_rpc(inner: Arc<NodeInner>, addr: SocketAddr) -> crate::error:
     Ok(())
 }
 
-struct BarkaSvcImpl {
-    inner: Arc<NodeInner>,
-}
-
-impl barka_svc::Server for BarkaSvcImpl {
+impl barka_svc::Server for Node {
     async fn produce(
         self: Rc<Self>,
         params: barka_svc::ProduceParams,
@@ -67,7 +62,7 @@ impl barka_svc::Server for BarkaSvcImpl {
         let records = req.get_records()?;
 
         let tp = (topic, partition);
-        let mut partitions = self.inner.partitions.lock().unwrap();
+        let mut partitions = self.partitions.lock().unwrap();
         let part = partitions
             .entry(tp)
             .or_insert_with(|| crate::log::partition::Partition::new(partition));
@@ -105,7 +100,7 @@ impl barka_svc::Server for BarkaSvcImpl {
         let max = req.get_max_records();
 
         let tp = (topic, partition);
-        let partitions = self.inner.partitions.lock().unwrap();
+        let partitions = self.partitions.lock().unwrap();
         let records = partitions
             .get(&tp)
             .map(|p| p.read(offset, max))

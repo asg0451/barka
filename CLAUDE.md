@@ -32,8 +32,9 @@ Two communication layers:
 ### Key design decisions
 - **Storage is a black box**: `src/storage.rs` is an opaque trait — intentionally has no implementation details.
 - **Lease is a stub**: `src/lease.rs` defines the S3 lease interface (`acquire`/`heartbeat`/`release`) with `todo!()` bodies.
-- **Partitions are keyed by `(topic, partition_id)`**: The `NodeInner.partitions` map uses `(String, u32)` as the key. Topics are created on first write.
+- **Partitions are keyed by `(topic, partition_id)`**: The `Node.partitions` map uses `(String, u32)` as the key. Topics are created on first write.
 - **No Raft**: Leadership is S3-based leases, not consensus protocol.
+- **No wrapper structs for capnp-rpc**: `Node` implements `barka_svc::Server` directly. It holds `Arc<Mutex<...>>` internally so it's cheap to clone. `serve_rpc` takes a `Node` by value, creates one capnp client, and clones it per connection (same pattern as [queueber](https://github.com/asg0451/queueber)). Don't introduce intermediate types to bridge capnp-rpc and shared state.
 
 ### Jepsen test structure (`jepsen/barka/`)
 - `db.clj` — starts/stops barka as a local process, waits for control port

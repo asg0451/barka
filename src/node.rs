@@ -30,42 +30,37 @@ impl Default for NodeConfig {
     }
 }
 
-pub struct NodeInner {
-    pub config: NodeConfig,
-    pub partitions: Mutex<HashMap<TopicPartition, Partition>>,
-}
-
+#[derive(Clone)]
 pub struct Node {
-    inner: Arc<NodeInner>,
+    pub config: NodeConfig,
+    pub partitions: Arc<Mutex<HashMap<TopicPartition, Partition>>>,
 }
 
 impl Node {
     pub fn new(config: NodeConfig) -> Self {
         Self {
-            inner: Arc::new(NodeInner {
-                config,
-                partitions: Mutex::new(HashMap::new()),
-            }),
+            config,
+            partitions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub async fn serve(self) -> crate::error::Result<()> {
-        let rpc_addr = self.inner.config.rpc_addr;
-        let control_addr = self.inner.config.control_addr;
+    pub async fn serve(&self) -> crate::error::Result<()> {
+        let rpc_addr = self.config.rpc_addr;
+        let control_addr = self.config.control_addr;
 
-        let rpc_inner = self.inner.clone();
-        let control_inner = self.inner.clone();
+        let rpc_node = self.clone();
+        let control_node = self.clone();
 
         let rpc_handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(serve_rpc(rpc_inner, rpc_addr))
+            rt.block_on(serve_rpc(rpc_node, rpc_addr))
         });
 
         let control_handle = tokio::spawn(async move {
-            serve_control(control_inner, control_addr).await
+            serve_control(control_node, control_addr).await
         });
 
         tokio::select! {
@@ -84,21 +79,21 @@ impl Node {
 ///   Response: {"ok":true,"offset":0}
 ///             {"ok":true,"values":["hello"]}
 ///             {"ok":false,"error":"..."}
-async fn serve_control(inner: Arc<NodeInner>, addr: SocketAddr) -> crate::error::Result<()> {
+async fn serve_control(node: Node, addr: SocketAddr) -> crate::error::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "control api listening");
 
     loop {
         let (stream, remote) = listener.accept().await?;
         info!(%remote, "control connection");
-        let inner = inner.clone();
+        let node = node.clone();
 
         tokio::spawn(async move {
             let (reader, mut writer) = stream.into_split();
             let mut lines = BufReader::new(reader).lines();
 
             while let Ok(Some(line)) = lines.next_line().await {
-                let response = handle_control_request(&inner, &line);
+                let response = handle_control_request(&node, &line);
                 let mut out = serde_json::to_string(&response).unwrap();
                 out.push('\n');
                 if writer.write_all(out.as_bytes()).await.is_err() {
@@ -143,7 +138,7 @@ struct ControlResponse {
     error: Option<String>,
 }
 
-fn handle_control_request(inner: &NodeInner, line: &str) -> ControlResponse {
+fn handle_control_request(node: &Node, line: &str) -> ControlResponse {
     let req: ControlRequest = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(e) => {
@@ -165,7 +160,7 @@ fn handle_control_request(inner: &NodeInner, line: &str) -> ControlResponse {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as i64;
-            let mut partitions = inner.partitions.lock().unwrap();
+            let mut partitions = node.partitions.lock().unwrap();
             let part = partitions
                 .entry(tp)
                 .or_insert_with(|| Partition::new(req.partition));
@@ -178,7 +173,7 @@ fn handle_control_request(inner: &NodeInner, line: &str) -> ControlResponse {
             }
         }
         "consume" => {
-            let partitions = inner.partitions.lock().unwrap();
+            let partitions = node.partitions.lock().unwrap();
             let records = partitions
                 .get(&tp)
                 .map(|p| p.read(req.offset, req.max))
