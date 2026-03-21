@@ -41,3 +41,6 @@ localstack-down:
 jepsen: build localstack
 	cd jepsen/barka && CLASSPATH= lein run test \
 		--barka-bin $(CURDIR)/target/debug/barka
+
+brew-install-lein:
+	brew install leiningen
