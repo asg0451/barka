@@ -1,3 +1,4 @@
+pub mod bytes_transport;
 pub mod client;
 pub mod server;
 

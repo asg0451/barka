@@ -1,10 +1,14 @@
 use anyhow::{bail, Context, Result};
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
 use aws_sdk_s3::Client;
+
+use std::collections::VecDeque;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
 
 const DEFAULT_BUCKET: &str = "barka";
 const DEFAULT_REGION: &str = "us-east-1";
@@ -330,7 +334,7 @@ pub async fn put_if_absent(
     client: &Client,
     bucket: &str,
     key: &str,
-    body: bytes::Bytes,
+    body: Bytes,
 ) -> Result<PutOutcome> {
     retry_with_backoff("put if absent", || {
         let client = client.clone();
@@ -359,6 +363,103 @@ pub async fn put_if_absent(
                         RetryResult::Retry(anyhow::anyhow!(e).context("s3: put if absent"))
                     }
                     None => RetryResult::Fail(anyhow::anyhow!(e).context("s3: put if absent")),
+                },
+            }
+        }
+    })
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Scatter-gather body for streaming S3 uploads
+// ---------------------------------------------------------------------------
+
+/// An `http_body_0_4::Body` that yields pre-existing `Bytes` chunks without
+/// copying. Used to stream a scatter-gather list to S3 in a single PUT.
+pub struct GatherBody {
+    chunks: VecDeque<Bytes>,
+    total_len: u64,
+}
+
+impl GatherBody {
+    pub fn new(chunks: Vec<Bytes>, total_len: u64) -> Self {
+        Self {
+            chunks: chunks.into(),
+            total_len,
+        }
+    }
+}
+
+impl http_body::Body for GatherBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_data(
+        mut self: Pin<&mut Self>,
+        _cx: &mut TaskContext<'_>,
+    ) -> Poll<Option<std::result::Result<Bytes, Self::Error>>> {
+        match self.chunks.pop_front() {
+            Some(chunk) => Poll::Ready(Some(Ok(chunk))),
+            None => Poll::Ready(None),
+        }
+    }
+
+    fn poll_trailers(
+        self: Pin<&mut Self>,
+        _cx: &mut TaskContext<'_>,
+    ) -> Poll<std::result::Result<Option<http::HeaderMap>, Self::Error>> {
+        Poll::Ready(Ok(None))
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.total_len)
+    }
+}
+
+/// Conditional-put via scatter-gather: streams `chunks` as a single S3 PUT
+/// body, using `if-none-match: *` semantics. Retries with backoff.
+#[tracing::instrument(skip(client, chunks), err)]
+pub async fn put_if_absent_stream(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    chunks: Vec<Bytes>,
+    total_len: u64,
+) -> Result<PutOutcome> {
+    retry_with_backoff("put if absent stream", || {
+        let client = client.clone();
+        let bucket = bucket.to_owned();
+        let key = key.to_owned();
+        let chunks = chunks.clone();
+        async move {
+            let body = GatherBody::new(chunks, total_len);
+            let byte_stream = ByteStream::from_body_0_4(body);
+            match client
+                .put_object()
+                .bucket(&bucket)
+                .key(key)
+                .content_length(total_len as i64)
+                .body(byte_stream)
+                .if_none_match("*")
+                .send()
+                .await
+            {
+                Ok(_) => RetryResult::Done(PutOutcome::Created),
+                Err(e) => match classify_put_if_absent_error(&e) {
+                    Some(S3CASOutcome::AlreadyExists) => {
+                        RetryResult::Done(PutOutcome::AlreadyExists)
+                    }
+                    Some(S3CASOutcome::RetryableConflict) => {
+                        RetryResult::Retry(anyhow::anyhow!(e))
+                    }
+                    None if is_transient_s3_error(&e) => {
+                        RetryResult::Retry(
+                            anyhow::anyhow!(e).context("s3: put if absent stream"),
+                        )
+                    }
+                    None => RetryResult::Fail(
+                        anyhow::anyhow!(e).context("s3: put if absent stream"),
+                    ),
                 },
             }
         }

@@ -3,6 +3,7 @@ pub mod leader_election;
 pub mod lease;
 pub mod log;
 pub mod node;
+pub mod producer;
 pub mod rpc;
 pub mod s3;
-pub mod producer;
+pub mod segment;
