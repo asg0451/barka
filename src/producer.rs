@@ -183,8 +183,14 @@ pub struct PartitionProducer {
 
 impl PartitionProducer {
     pub async fn new(s3_config: &S3Config, prefix: String) -> Arc<Self> {
-        Self::with_opts(s3_config, prefix, DEFAULT_MAX_RECORDS, DEFAULT_MAX_BYTES, DEFAULT_LINGER)
-            .await
+        Self::with_opts(
+            s3_config,
+            prefix,
+            DEFAULT_MAX_RECORDS,
+            DEFAULT_MAX_BYTES,
+            DEFAULT_LINGER,
+        )
+        .await
     }
 
     pub async fn with_opts(
@@ -199,7 +205,7 @@ impl PartitionProducer {
             bucket: s3_config.bucket.clone(),
             s3_client,
             prefix,
-            next_sequence: AtomicU64::new(0),
+            next_sequence: AtomicU64::new(0), // TODO: get from S3. add epoch too
             inner: Mutex::new(ProducerInner::new(max_records, max_bytes)),
             linger,
         });
