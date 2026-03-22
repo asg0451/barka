@@ -3,8 +3,8 @@ use std::net::{IpAddr, SocketAddr};
 use barka::node::{Node, NodeConfig};
 use barka::s3::{self, S3Config};
 use clap::Parser;
-use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Parser)]
 #[command(name = "barka", version, about = "Barka distributed log node")]
@@ -30,6 +30,9 @@ struct Cli {
 
     #[arg(long, env = "AWS_REGION", default_value = "us-east-1")]
     aws_region: String,
+
+    #[arg(long, env = "BARKA_S3_PREFIX")]
+    s3_prefix: Option<String>,
 }
 
 impl Cli {
@@ -38,7 +41,7 @@ impl Cli {
             node_id: self.node_id,
             rpc_addr: SocketAddr::new(self.bind, self.rpc_port),
             jepsen_gateway_addr: SocketAddr::new(self.bind, self.jepsen_gateway_port),
-            s3_prefix: None,
+            s3_prefix: self.s3_prefix.clone(),
         }
     }
 
