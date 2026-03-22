@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info};
 
-use crate::node::{Node, ProduceInput};
+use crate::node::Node;
 use crate::rpc::barka_capnp::barka_svc;
 
 pub async fn serve_rpc(node: Node, addr: SocketAddr) -> anyhow::Result<()> {
@@ -57,26 +57,7 @@ impl barka_svc::Server for Node {
         mut results: barka_svc::ProduceResults,
     ) -> Result<(), capnp::Error> {
         let req = params.get()?.get_request()?;
-        let topic = req.get_topic()?.to_string()?;
-        let partition = req.get_partition();
-        let records = req.get_records()?;
-
-        let mut inputs = Vec::with_capacity(records.len() as usize);
-        for record in records.iter() {
-            inputs.push(ProduceInput {
-                key: {
-                    let k = record.get_key()?;
-                    if k.is_empty() {
-                        None
-                    } else {
-                        Some(k.to_vec())
-                    }
-                },
-                value: record.get_value()?.to_vec(),
-                timestamp: record.get_timestamp(),
-            });
-        }
-        let base_offset = self.produce_records(topic, partition, inputs);
+        let base_offset = self.apply_produce_request(req)?;
 
         results
             .get()
@@ -91,24 +72,8 @@ impl barka_svc::Server for Node {
         mut results: barka_svc::ConsumeResults,
     ) -> Result<(), capnp::Error> {
         let req = params.get()?.get_request()?;
-        let topic = req.get_topic()?.to_string()?;
-        let partition = req.get_partition();
-        let offset = req.get_offset();
-        let max = req.get_max_records();
-
-        let records = self.consume_records(topic, partition, offset, max);
-
         let resp = results.get().get_response()?;
-        let mut list = resp.init_records(records.len() as u32);
-        for (i, rec) in records.iter().enumerate() {
-            let mut entry = list.reborrow().get(i as u32);
-            if let Some(ref k) = rec.key {
-                entry.set_key(k);
-            }
-            entry.set_value(&rec.value);
-            entry.set_offset(rec.offset);
-            entry.set_timestamp(rec.timestamp);
-        }
+        self.apply_consume_request(req, resp)?;
         Ok(())
     }
 }

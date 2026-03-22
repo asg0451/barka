@@ -4,16 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::jepsen_gateway;
 use crate::log::partition::Partition;
-use crate::log::record::Record;
+use crate::rpc::barka_capnp::{consume_request, consume_response, produce_request};
 use crate::rpc::server::serve_rpc;
-
-/// One record to append (shared by Cap'n Proto and the Jepsen JSON gateway).
-#[derive(Debug)]
-pub struct ProduceInput {
-    pub key: Option<Vec<u8>>,
-    pub value: Vec<u8>,
-    pub timestamp: i64,
-}
 
 /// (topic, partition_id)
 pub type TopicPartition = (String, u32);
@@ -103,14 +95,13 @@ impl Node {
         Ok(())
     }
 
-    /// Append records to `(topic, partition)`; returns base offset of the first record,
-    /// or `0` if `records` is empty (matches Cap'n Proto response shape).
-    pub fn produce_records(
-        &self,
-        topic: String,
-        partition: u32,
-        records: impl IntoIterator<Item = ProduceInput>,
-    ) -> u64 {
+    /// Apply a Cap'n Proto [`produce_request::Reader`]: read key/value as slices from the
+    /// inbound message and copy once per field into partition storage.
+    pub fn apply_produce_request(&self, request: produce_request::Reader<'_>) -> capnp::Result<u64> {
+        let topic = request.get_topic()?.to_string()?;
+        let partition = request.get_partition();
+        let records = request.get_records()?;
+
         let tp = (topic, partition);
         let mut partitions = self.partitions.lock().unwrap();
         let part = partitions
@@ -118,28 +109,51 @@ impl Node {
             .or_insert_with(|| Partition::new(partition));
 
         let mut base_offset = None;
-        for r in records {
-            let off = part.append(r.key, r.value, r.timestamp);
+        for record in records.iter() {
+            let key_slice = record.get_key()?;
+            let key = if key_slice.is_empty() {
+                None
+            } else {
+                Some(key_slice.to_vec())
+            };
+            let value = record.get_value()?.to_vec();
+            let ts = record.get_timestamp();
+            let off = part.append(key, value, ts);
             if base_offset.is_none() {
                 base_offset = Some(off);
             }
         }
-        base_offset.unwrap_or(0)
+        Ok(base_offset.unwrap_or(0))
     }
 
-    /// Read up to `max` records from `offset` onward.
-    pub fn consume_records(
+    /// Apply a Cap'n Proto [`consume_request::Reader`] and fill [`consume_response::Builder`].
+    pub fn apply_consume_request(
         &self,
-        topic: String,
-        partition: u32,
-        offset: u64,
-        max: u32,
-    ) -> Vec<Record> {
+        request: consume_request::Reader<'_>,
+        response: consume_response::Builder<'_>,
+    ) -> capnp::Result<()> {
+        let topic = request.get_topic()?.to_string()?;
+        let partition = request.get_partition();
+        let offset = request.get_offset();
+        let max = request.get_max_records();
+
         let tp = (topic, partition);
         let partitions = self.partitions.lock().unwrap();
-        partitions
+        let records = partitions
             .get(&tp)
             .map(|p| p.read(offset, max))
-            .unwrap_or_default()
+            .unwrap_or_default();
+
+        let mut list = response.init_records(records.len() as u32);
+        for (i, rec) in records.iter().enumerate() {
+            let mut entry = list.reborrow().get(i as u32);
+            if let Some(ref k) = rec.key {
+                entry.set_key(k);
+            }
+            entry.set_value(&rec.value);
+            entry.set_offset(rec.offset);
+            entry.set_timestamp(rec.timestamp);
+        }
+        Ok(())
     }
 }
