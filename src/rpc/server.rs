@@ -119,7 +119,8 @@ mod tests {
 
     use super::*;
     use crate::log_offset::compose;
-    use crate::node::{Node, NodeConfig};
+    use crate::node::{Node, NodeConfig, ProducerBatchLimits};
+    use crate::producer;
     use crate::rpc::client::BarkaClient;
     use crate::s3::S3Config;
 
@@ -231,6 +232,117 @@ mod tests {
         s.unwrap();
     }
 
+    /// `Node` with `producer_limits: None` must use library defaults (100k records / 100 MiB cap).
+    /// A single produce larger than the stress-test override (100) is rejected if defaults regress.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn e2e_default_producer_limits_single_large_produce() {
+        const N: usize = 101;
+        assert!(
+            N > 100 && N <= producer::DEFAULT_MAX_RECORDS,
+            "pick N above test overrides and within DEFAULT_MAX_RECORDS"
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let s3_config = S3Config {
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            bucket: "test-rpc".into(),
+            region: "us-east-1".into(),
+        };
+        let s3_client = crate::s3::build_client(&s3_config).await;
+        crate::s3::ensure_bucket(&s3_client, &s3_config.bucket)
+            .await
+            .unwrap();
+
+        let node = Node::new(
+            NodeConfig {
+                rpc_addr: addr,
+                s3_prefix: Some(format!(
+                    "rpc-default-limits/{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                )),
+                producer_limits: None,
+                ..Default::default()
+            },
+            &s3_config,
+        )
+        .await
+        .unwrap();
+        assert!(
+            node.config.producer_limits.is_none(),
+            "e2e expects real PartitionProducer::new defaults"
+        );
+
+        let server_node = node.clone();
+        let server = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
+                        let (reader, writer) = futures::AsyncReadExt::split(stream);
+                        let call_bytes_queue: MessageBytesQueue =
+                            Rc::new(RefCell::new(VecDeque::new()));
+                        let network = BytesVatNetwork::new(
+                            futures::io::BufReader::new(reader),
+                            futures::io::BufWriter::new(writer),
+                            rpc_twoparty_capnp::Side::Server,
+                            Default::default(),
+                            call_bytes_queue.clone(),
+                        );
+                        let per_conn = PerConnectionNode {
+                            node: server_node,
+                            msg_bytes: call_bytes_queue,
+                        };
+                        let client: barka_svc::Client = capnp_rpc::new_client(per_conn);
+                        let rpc = RpcSystem::new(Box::new(network), Some(client.client));
+                        rpc.await.unwrap();
+                    })
+                    .await;
+            });
+        });
+
+        let client = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
+                        let client = BarkaClient::connect(addr).await.unwrap();
+                        let values: Vec<Vec<u8>> = (0..N)
+                            .map(|i| format!("rec-{i}").into_bytes())
+                            .collect();
+                        let recs = client
+                            .produce("default-limits-topic", 0, values.clone())
+                            .await
+                            .unwrap();
+                        assert_eq!(recs.len(), N);
+                        for (i, r) in recs.iter().enumerate() {
+                            assert_eq!(r.offset, compose(0, i as u64));
+                            assert_eq!(r.value, values[i]);
+                        }
+                    })
+                    .await;
+            });
+        });
+
+        let (c, s) = tokio::join!(client, server);
+        c.unwrap();
+        s.unwrap();
+    }
+
     /// Several concurrent RPC clients, each producing in batches for a few seconds on its own
     /// topic, then consuming back and checking offsets and payloads. Requires LocalStack S3.
     #[tokio::test(flavor = "multi_thread")]
@@ -258,6 +370,8 @@ mod tests {
             .await
             .unwrap();
 
+        // Tight batch limits so flushes trigger without waiting on the 1s linger timer
+        // (production defaults are 100k records / 100 MiB).
         let node = Node::new(
             NodeConfig {
                 rpc_addr: addr,
@@ -269,6 +383,11 @@ mod tests {
                         .unwrap()
                         .as_nanos()
                 )),
+                producer_limits: Some(ProducerBatchLimits {
+                    max_records: 100,
+                    max_bytes: 1024 * 1024,
+                    linger_ms: 1000,
+                }),
                 ..Default::default()
             },
             &s3_config,

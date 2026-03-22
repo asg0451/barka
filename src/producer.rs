@@ -209,9 +209,10 @@ async fn await_flush_done(mut rx: watch::Receiver<Option<Result<(), String>>>) -
     }
 }
 
-const DEFAULT_MAX_RECORDS: usize = 100;
-const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
-const DEFAULT_LINGER: Duration = Duration::from_millis(1000);
+pub const DEFAULT_MAX_RECORDS: usize = 100_000;
+pub const DEFAULT_MAX_BYTES: usize = 100 * 1024 * 1024;
+pub const DEFAULT_LINGER_MS: u64 = 1000;
+const DEFAULT_LINGER: Duration = Duration::from_millis(DEFAULT_LINGER_MS);
 
 /// Segment object keys are `{prefix}/{seq:020}.dat`.
 fn parse_segment_sequence_key(prefix: &str, key: &str) -> Option<u64> {
@@ -349,6 +350,28 @@ impl PartitionProducer {
 
         let round = {
             let mut inner = self.inner.lock().unwrap();
+            if record_count > inner.max_records {
+                anyhow::bail!(
+                    "produce request has {} records; max per request is {} (segment batch limit)",
+                    record_count,
+                    inner.max_records
+                );
+            }
+            if byte_size > inner.max_bytes {
+                anyhow::bail!(
+                    "produce request is {} bytes (capnp words); max per request is {} (segment batch limit)",
+                    byte_size,
+                    inner.max_bytes
+                );
+            }
+            let max_intra_records = (log_offset::INTRA_MASK + 1) as usize;
+            if record_count > max_intra_records {
+                anyhow::bail!(
+                    "produce request has {} records; max {} records per segment (offset encoding)",
+                    record_count,
+                    max_intra_records
+                );
+            }
             inner.pending_records += record_count;
             inner.pending_bytes += byte_size;
 
@@ -563,26 +586,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_request_flushes_immediately() {
+    async fn produce_request_over_max_records_is_rejected() {
         let producer = test_producer(3, 1024 * 1024).await;
         let msg = TestMessage::new(5, 10);
-        let produced = producer
+        let err = producer
             .apply_produce_request(msg.bytes().clone(), msg.request())
             .await
-            .unwrap();
-        assert_eq!(produced.len(), 5);
-        for (i, p) in produced.iter().enumerate() {
-            assert_eq!(p.offset, compose(0, i as u64));
-        }
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("max per request is 3"),
+            "unexpected error: {err}"
+        );
+    }
 
-        let key = format!("{}/{:020}.dat", producer.prefix, 0);
-        let (_, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
+    #[tokio::test]
+    async fn produce_request_over_max_bytes_is_rejected() {
+        let producer = test_producer(100, 256).await;
+        let msg = TestMessage::new(1, 200);
+        let err = producer
+            .apply_produce_request(msg.bytes().clone(), msg.request())
             .await
-            .unwrap();
-        assert_eq!(records.len(), 5);
-        for (i, rec) in records.iter().enumerate() {
-            assert_eq!(rec.offset, compose(0, i as u64));
-        }
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("max per request is 256"),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

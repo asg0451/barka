@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::jepsen_gateway;
 use crate::log::partition::Partition;
@@ -12,6 +13,23 @@ use crate::s3::S3Config;
 /// (topic, partition_id)
 pub type TopicPartition = (String, u32);
 
+/// Overrides [`PartitionProducer`](crate::producer::PartitionProducer) batch limits and flush linger.
+///
+/// Serialized as `linger_ms` (milliseconds) so configs stay JSON-friendly. When omitted from
+/// [`NodeConfig`], [`PartitionProducer::new`](crate::producer::PartitionProducer::new) defaults apply.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ProducerBatchLimits {
+    pub max_records: usize,
+    pub max_bytes: usize,
+    pub linger_ms: u64,
+}
+
+impl ProducerBatchLimits {
+    pub fn linger(&self) -> Duration {
+        Duration::from_millis(self.linger_ms)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NodeConfig {
     pub node_id: u64,
@@ -22,6 +40,8 @@ pub struct NodeConfig {
     /// empty string is treated as unset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_limits: Option<ProducerBatchLimits>,
 }
 
 impl NodeConfig {
@@ -51,6 +71,7 @@ impl Default for NodeConfig {
             rpc_addr: "127.0.0.1:9292".parse().unwrap(),
             jepsen_gateway_addr: "127.0.0.1:9293".parse().unwrap(),
             s3_prefix: None,
+            producer_limits: None,
         }
     }
 }
@@ -66,7 +87,20 @@ impl Node {
     pub async fn new(config: NodeConfig, s3_config: &S3Config) -> anyhow::Result<Self> {
         let prefix = NodeConfig::segment_key_prefix(config.s3_prefix.as_deref());
         let partition_prefix = format!("{}/test/0", prefix);
-        let producer = PartitionProducer::new(s3_config, partition_prefix, 0).await?;
+        let producer = match config.producer_limits.as_ref() {
+            Some(l) => {
+                PartitionProducer::with_opts(
+                    s3_config,
+                    partition_prefix,
+                    0,
+                    l.max_records,
+                    l.max_bytes,
+                    l.linger(),
+                )
+                .await?
+            }
+            None => PartitionProducer::new(s3_config, partition_prefix, 0).await?,
+        };
         Ok(Self {
             config,
             partitions: Arc::new(Mutex::new(HashMap::new())),
@@ -169,5 +203,25 @@ impl Node {
             entry.set_timestamp(rec.timestamp);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_config_serde_round_trips_producer_limits() {
+        let cfg = NodeConfig {
+            producer_limits: Some(ProducerBatchLimits {
+                max_records: 42,
+                max_bytes: 99,
+                linger_ms: 500,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: NodeConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.producer_limits, cfg.producer_limits);
     }
 }

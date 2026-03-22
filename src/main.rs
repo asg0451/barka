@@ -1,6 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 
-use barka::node::{Node, NodeConfig};
+use barka::node::{Node, NodeConfig, ProducerBatchLimits};
+use barka::producer;
 use barka::s3::{self, S3Config};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -33,15 +34,47 @@ struct Cli {
 
     #[arg(long, env = "BARKA_S3_PREFIX")]
     s3_prefix: Option<String>,
+
+    /// Max records per produce request and per segment batch (default if flag omitted: production default).
+    #[arg(long, env = "BARKA_PRODUCER_MAX_RECORDS")]
+    producer_max_records: Option<usize>,
+
+    /// Max Cap'n Proto message size (words×8) per produce request / batch (default if flag omitted: production default).
+    #[arg(long, env = "BARKA_PRODUCER_MAX_BYTES")]
+    producer_max_bytes: Option<usize>,
+
+    /// Milliseconds to wait before flushing a non-full batch (default if flag omitted: production default).
+    #[arg(long, env = "BARKA_PRODUCER_LINGER_MS")]
+    producer_linger_ms: Option<u64>,
 }
 
 impl Cli {
     fn node_config(&self) -> NodeConfig {
+        let producer_limits =
+            if self.producer_max_records.is_some()
+                || self.producer_max_bytes.is_some()
+                || self.producer_linger_ms.is_some()
+            {
+                Some(ProducerBatchLimits {
+                    max_records: self
+                        .producer_max_records
+                        .unwrap_or(producer::DEFAULT_MAX_RECORDS),
+                    max_bytes: self
+                        .producer_max_bytes
+                        .unwrap_or(producer::DEFAULT_MAX_BYTES),
+                    linger_ms: self
+                        .producer_linger_ms
+                        .unwrap_or(producer::DEFAULT_LINGER_MS),
+                })
+            } else {
+                None
+            };
         NodeConfig {
             node_id: self.node_id,
             rpc_addr: SocketAddr::new(self.bind, self.rpc_port),
             jepsen_gateway_addr: SocketAddr::new(self.bind, self.jepsen_gateway_port),
             s3_prefix: self.s3_prefix.clone(),
+            producer_limits,
         }
     }
 
