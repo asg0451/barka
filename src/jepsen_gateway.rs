@@ -12,9 +12,12 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::rpc::client::BarkaClient;
+
+/// Max time for a single produce/consume RPC before returning `{"ok":false,"error":"..."}`.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Protocol: newline-delimited JSON.
 ///
@@ -134,47 +137,87 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
     match req.op.as_str() {
         "produce" => {
             let value = req.value.unwrap_or_default().into_bytes();
-            match client
-                .produce(&req.topic, req.partition, vec![value])
-                .await
+            match tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                client.produce(&req.topic, req.partition, vec![value]),
+            )
+            .await
             {
-                Ok(offset) => JsonlResponse {
+                Ok(Ok(offset)) => JsonlResponse {
                     ok: true,
                     offset: Some(offset),
                     values: None,
                     error: None,
                 },
-                Err(e) => JsonlResponse {
+                Ok(Err(e)) => JsonlResponse {
                     ok: false,
                     offset: None,
                     values: None,
                     error: Some(e.to_string()),
                 },
-            }
-        }
-        "consume" => match client
-            .consume(&req.topic, req.partition, req.offset, req.max)
-            .await
-        {
-            Ok(records) => {
-                let values: Vec<String> = records
-                    .iter()
-                    .map(|r| String::from_utf8_lossy(&r.value).to_string())
-                    .collect();
-                JsonlResponse {
-                    ok: true,
-                    offset: None,
-                    values: Some(values),
-                    error: None,
+                Err(_elapsed) => {
+                    warn!(
+                        topic = %req.topic,
+                        partition = req.partition,
+                        ?REQUEST_TIMEOUT,
+                        "jepsen gateway produce timed out"
+                    );
+                    JsonlResponse {
+                        ok: false,
+                        offset: None,
+                        values: None,
+                        error: Some(format!(
+                            "request timed out after {:?}",
+                            REQUEST_TIMEOUT
+                        )),
+                    }
                 }
             }
-            Err(e) => JsonlResponse {
-                ok: false,
-                offset: None,
-                values: None,
-                error: Some(e.to_string()),
-            },
-        },
+        }
+        "consume" => {
+            match tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                client.consume(&req.topic, req.partition, req.offset, req.max),
+            )
+            .await
+            {
+                Ok(Ok(records)) => {
+                    let values: Vec<String> = records
+                        .iter()
+                        .map(|r| String::from_utf8_lossy(&r.value).to_string())
+                        .collect();
+                    JsonlResponse {
+                        ok: true,
+                        offset: None,
+                        values: Some(values),
+                        error: None,
+                    }
+                }
+                Ok(Err(e)) => JsonlResponse {
+                    ok: false,
+                    offset: None,
+                    values: None,
+                    error: Some(e.to_string()),
+                },
+                Err(_elapsed) => {
+                    warn!(
+                        topic = %req.topic,
+                        partition = req.partition,
+                        ?REQUEST_TIMEOUT,
+                        "jepsen gateway consume timed out"
+                    );
+                    JsonlResponse {
+                        ok: false,
+                        offset: None,
+                        values: None,
+                        error: Some(format!(
+                            "request timed out after {:?}",
+                            REQUEST_TIMEOUT
+                        )),
+                    }
+                }
+            }
+        }
         other => JsonlResponse {
             ok: false,
             offset: None,

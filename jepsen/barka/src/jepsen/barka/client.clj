@@ -9,14 +9,23 @@
   (:import (java.io BufferedReader InputStreamReader PrintWriter)
            (java.net Socket)))
 
+(def ^:private default-so-timeout-ms
+  "Read timeout for each request/response round-trip (server uses 10s RPC cap)."
+  15000)
+
 (defn open
   "Opens a TCP connection to a barka node's Jepsen gateway port.
-   Returns a map with :socket, :in (BufferedReader), :out (PrintWriter)."
+   Returns a map with :socket, :in (BufferedReader), :out (PrintWriter).
+   Socket read timeout: `BARKA_JEPSEN_CLIENT_TIMEOUT_MS` env or 15000 ms."
   [host port]
   (let [sock (Socket. ^String host ^int port)
-        in   (BufferedReader. (InputStreamReader. (.getInputStream sock)))
-        out  (PrintWriter. (.getOutputStream sock) true)]
-    {:socket sock :in in :out out}))
+        timeout-ms (or (some-> (System/getenv "BARKA_JEPSEN_CLIENT_TIMEOUT_MS")
+                               Long/parseLong)
+                      default-so-timeout-ms)]
+    (.setSoTimeout sock (int timeout-ms))
+    (let [in   (BufferedReader. (InputStreamReader. (.getInputStream sock)))
+          out  (PrintWriter. (.getOutputStream sock) true)]
+      {:socket sock :in in :out out})))
 
 (defn close!
   "Closes a client connection."

@@ -5,8 +5,10 @@
    Multi-node: each node gets its own barka process on a unique port pair.
    n1 → rpc 9292 / jepsen gateway 9293, n2 → rpc 9294 / jepsen gateway 9295, etc."
   (:require [clojure.tools.logging :refer [info warn]]
-            [jepsen.db :as db])
-  (:import (java.net Socket InetSocketAddress HttpURLConnection URL)))
+            [jepsen.db :as db]
+            [jepsen.store :as store])
+  (:import (java.lang ProcessBuilder$Redirect)
+           (java.net Socket InetSocketAddress HttpURLConnection URL)))
 
 (def barka-bin
   "Path to the barka binary. Override via :barka-bin in test opts."
@@ -80,13 +82,18 @@
               gw-port  (jepsen-gateway-port-for node)
               idx      (node-idx node)]
           (info "starting barka" node "rpc=" rpc-port "jepsen-gateway=" gw-port)
-          (let [pb (ProcessBuilder. [bin])]
+          (let [log-file (store/path! test "barka-logs" (str node) "barka.log")
+                pb       (doto (ProcessBuilder. [bin])
+                           (.redirectErrorStream true)
+                           (.redirectOutput (ProcessBuilder$Redirect/appendTo log-file)))]
+            (info "barka" node "logs →" (.getAbsolutePath log-file))
             (doto (.environment pb)
               (.put "AWS_ENDPOINT_URL" localstack-endpoint)
               (.put "AWS_ACCESS_KEY_ID" "test")
               (.put "AWS_SECRET_ACCESS_KEY" "test")
               (.put "AWS_REGION" "us-east-1")
-              (.put "RUST_LOG" "info")
+              (.put "RUST_LOG" "debug")
+              (.put "RUST_BACKTRACE" "1")
               (.put "BARKA_NODE_ID" (str idx))
               (.put "BARKA_RPC_PORT" (str rpc-port))
               (.put "BARKA_JEPSEN_GATEWAY_PORT" (str gw-port)))
