@@ -63,6 +63,74 @@ pub struct LeaderElection {
 const LOCK_FILE_PREFIX: &str = "lock/";
 const VALIDITY_MILLIS: u64 = 10_000;
 
+const RETRY_MAX: u32 = 4;
+const RETRY_BASE_MS: u64 = 50;
+const RETRY_CAP_MS: u64 = 2_000;
+
+enum RetryResult<T> {
+    Done(T),
+    Retry(anyhow::Error),
+    Fail(anyhow::Error),
+}
+
+#[tracing::instrument(skip_all, fields(op), err)]
+async fn retry_with_backoff<T, Fut, F>(op: &str, mut f: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = RetryResult<T>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        let span = tracing::info_span!("retry_attempt", %op, attempt);
+        match tracing::Instrument::instrument(f(), span).await {
+            RetryResult::Done(v) => return Ok(v),
+            RetryResult::Fail(e) => return Err(e),
+            RetryResult::Retry(e) => {
+                attempt += 1;
+                if attempt > RETRY_MAX {
+                    return Err(e.context(format!("{op}: exhausted {RETRY_MAX} retries")));
+                }
+                let delay = backoff_delay(attempt);
+                tracing::warn!(
+                    attempt,
+                    max = RETRY_MAX,
+                    delay_ms = delay.as_millis() as u64,
+                    error = %e,
+                    "{op}: retrying",
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+fn backoff_delay(attempt: u32) -> std::time::Duration {
+    let exp = RETRY_BASE_MS.saturating_mul(1u64 << attempt.min(10));
+    let jitter = cheap_jitter_ms(exp);
+    let ms = (RETRY_BASE_MS + jitter).min(RETRY_CAP_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Sub-millisecond jitter sourced from the system clock. Only needs to
+/// desynchronize concurrent retriers, not be cryptographically random.
+fn cheap_jitter_ms(max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos() as u64;
+    nanos % max
+}
+
+fn is_transient_s3_error<E>(err: &SdkError<E>) -> bool {
+    match err.raw_response() {
+        Some(raw) => matches!(raw.status().as_u16(), 429 | 500 | 502 | 503 | 504),
+        None => true,
+    }
+}
+
 impl LeaderElection {
     pub async fn new<S: AsRef<str>>(node_id: u64, namespace: S, s3_config: S3Config) -> Self {
         let s3_client = s3::build_client(&s3_config).await;
@@ -90,16 +158,28 @@ impl LeaderElection {
     // 7. Otherwise, another process already is the leader, so do nothing.
     //    Go back to 1. periodically
     // also we probably want a background process deleting old lock files..
-    #[tracing::instrument(skip_all, fields(node_id = self.node_id, prefix = self.prefix, bucket = self.bucket))]
+    #[tracing::instrument(skip_all, fields(node_id = self.node_id, prefix = self.prefix, bucket = self.bucket), err, ret)]
     pub async fn try_become_leader(&self) -> Result<TryBecomeLeaderResult> {
-        let lock_files = self
-            .s3_client
-            .list_objects_v2()
-            .bucket(&self.bucket)
-            .prefix(LOCK_FILE_PREFIX)
-            .send()
-            .await
-            .context("s3: list lock files")?;
+        let lock_files = retry_with_backoff("list lock files", || {
+            let client = self.s3_client.clone();
+            let bucket = self.bucket.clone();
+            async move {
+                match client
+                    .list_objects_v2()
+                    .bucket(&bucket)
+                    .prefix(LOCK_FILE_PREFIX)
+                    .send()
+                    .await
+                {
+                    Ok(v) => RetryResult::Done(v),
+                    Err(e) if is_transient_s3_error(&e) => {
+                        RetryResult::Retry(anyhow::anyhow!(e).context("s3: list lock files"))
+                    }
+                    Err(e) => RetryResult::Fail(anyhow::anyhow!(e).context("s3: list lock files")),
+                }
+            }
+        })
+        .await?;
 
         if lock_files.continuation_token.is_some() {
             bail!("leader election: too many lock files (paginated response)");
@@ -137,14 +217,13 @@ impl LeaderElection {
             }
         }
 
-        // create new lock file
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64;
         let valid_until_ms = now_ms + VALIDITY_MILLIS;
 
-        let lock_file = serde_json::to_string(&LockFile {
+        let lock_file_body = serde_json::to_string(&LockFile {
             valid_until_ms,
             expired: false,
             node_id: self.node_id,
@@ -153,35 +232,49 @@ impl LeaderElection {
 
         let epoch = last_epoch.unwrap_or(Epoch(0)).next();
         let lock_file_key = epoch.to_key(&self.prefix);
-        let put_res = self
-            .s3_client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(lock_file_key)
-            .body(ByteStream::from(SdkBody::from(lock_file)))
-            .if_none_match("*") // CAS
-            .send()
-            .await;
-        match put_res {
-            Ok(_) => {
-                tracing::info!(epoch = epoch.0, "became leader");
-                Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
-                    valid_until_ms,
-                    epoch,
-                }))
+
+        retry_with_backoff("create lock file", || {
+            let client = self.s3_client.clone();
+            let bucket = self.bucket.clone();
+            let body = lock_file_body.clone();
+            let key = lock_file_key.clone();
+            async move {
+                match client
+                    .put_object()
+                    .bucket(&bucket)
+                    .key(key)
+                    .body(ByteStream::from(SdkBody::from(body)))
+                    .if_none_match("*")
+                    .send()
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(epoch = epoch.0, "became leader");
+                        RetryResult::Done(TryBecomeLeaderResult::Leader(LeadershipInfo {
+                            valid_until_ms,
+                            epoch,
+                        }))
+                    }
+                    Err(e) => match classify_put_if_absent_error(&e) {
+                        Some(S3CASOutcome::AlreadyExists) => {
+                            tracing::debug!("lock file already exists, not becoming leader");
+                            RetryResult::Done(TryBecomeLeaderResult::NotLeader)
+                        }
+                        Some(S3CASOutcome::RetryableConflict) => {
+                            tracing::debug!("retryable CAS conflict");
+                            RetryResult::Retry(anyhow::anyhow!(e))
+                        }
+                        None if is_transient_s3_error(&e) => {
+                            RetryResult::Retry(anyhow::anyhow!(e).context("s3: create lock file"))
+                        }
+                        None => {
+                            RetryResult::Fail(anyhow::anyhow!(e).context("s3: create lock file"))
+                        }
+                    },
+                }
             }
-            Err(e) => match classify_put_if_absent_error(&e) {
-                Some(S3CASOutcome::AlreadyExists) => {
-                    tracing::debug!("lock file already exists, not becoming leader");
-                    Ok(TryBecomeLeaderResult::NotLeader)
-                }
-                Some(S3CASOutcome::RetryableConflict) => {
-                    tracing::debug!("retryable CAS conflict, will retry... todo");
-                    Ok(TryBecomeLeaderResult::NotLeader)
-                }
-                None => Err(anyhow::anyhow!(e).context("s3: put lock file")),
-            },
-        }
+        })
+        .await
     }
 }
 
