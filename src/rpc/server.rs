@@ -136,6 +136,13 @@ mod tests {
         let node = Node::new(
             NodeConfig {
                 rpc_addr: addr,
+                s3_prefix: Some(format!(
+                    "rpc-round-trip/{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                )),
                 ..Default::default()
             },
             &s3_config,
@@ -252,6 +259,14 @@ mod tests {
         let node = Node::new(
             NodeConfig {
                 rpc_addr: addr,
+                s3_prefix: Some(format!(
+                    "rpc-stress/{}/{}",
+                    bucket,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                )),
                 ..Default::default()
             },
             &s3_config,

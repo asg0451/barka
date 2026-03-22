@@ -17,6 +17,31 @@ pub struct NodeConfig {
     pub node_id: u64,
     pub rpc_addr: SocketAddr,
     pub jepsen_gateway_addr: SocketAddr,
+    /// Optional path before [`Self::SEGMENT_PREFIX_TAIL`] (`data`). Segment keys use
+    /// `{optional}/data/test/0` when set, or `data/test/0` when `None`. Trim slashes;
+    /// empty string is treated as unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s3_prefix: Option<String>,
+}
+
+impl NodeConfig {
+    pub const SEGMENT_PREFIX_TAIL: &'static str = "data";
+
+    /// Full S3 prefix for segment objects under this node.
+    pub fn segment_key_prefix(optional_leading: Option<&str>) -> String {
+        let tail = Self::SEGMENT_PREFIX_TAIL;
+        match optional_leading {
+            None => tail.to_string(),
+            Some(s) => {
+                let s = s.trim_matches('/');
+                if s.is_empty() {
+                    tail.to_string()
+                } else {
+                    format!("{s}/{tail}")
+                }
+            }
+        }
+    }
 }
 
 impl Default for NodeConfig {
@@ -25,6 +50,7 @@ impl Default for NodeConfig {
             node_id: 0,
             rpc_addr: "127.0.0.1:9292".parse().unwrap(),
             jepsen_gateway_addr: "127.0.0.1:9293".parse().unwrap(),
+            s3_prefix: None,
         }
     }
 }
@@ -38,15 +64,9 @@ pub struct Node {
 
 impl Node {
     pub async fn new(config: NodeConfig, s3_config: &S3Config) -> anyhow::Result<Self> {
-        // TODO: this is a hack and we probably dont need it anymore. but its easier than clearing between runs.
-        let prefix = format!(
-            "{}/data/test/0",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let producer = PartitionProducer::new(s3_config, prefix, 0).await?;
+        let prefix = NodeConfig::segment_key_prefix(config.s3_prefix.as_deref());
+        let partition_prefix = format!("{}/test/0", prefix);
+        let producer = PartitionProducer::new(s3_config, partition_prefix, 0).await?;
         Ok(Self {
             config,
             partitions: Arc::new(Mutex::new(HashMap::new())),

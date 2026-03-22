@@ -38,6 +38,7 @@ impl Cli {
             node_id: self.node_id,
             rpc_addr: SocketAddr::new(self.bind, self.rpc_port),
             jepsen_gateway_addr: SocketAddr::new(self.bind, self.jepsen_gateway_port),
+            s3_prefix: None,
         }
     }
 
