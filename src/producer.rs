@@ -348,7 +348,12 @@ impl PartitionProducer {
         }
         let byte_size = (request.total_size()?.word_count as usize) * 8;
 
-        let round = {
+        enum PendingFlush {
+            Ready(Arc<FlushRound>),
+            Waiting(oneshot::Receiver<Arc<FlushRound>>),
+        }
+
+        let pending = {
             let mut inner = self.inner.lock().unwrap();
             if record_count > inner.max_records {
                 anyhow::bail!(
@@ -383,14 +388,19 @@ impl PartitionProducer {
                 }
                 inner.pending_records = 0;
                 inner.pending_bytes = 0;
-                round
+                PendingFlush::Ready(round)
             } else {
                 let (tx, rx) = oneshot::channel();
                 inner.waiters.push(tx);
-                drop(inner);
-                rx.await
-                    .map_err(|_| anyhow::anyhow!("producer dropped before flush"))?
+                PendingFlush::Waiting(rx)
             }
+        };
+
+        let round = match pending {
+            PendingFlush::Ready(r) => r,
+            PendingFlush::Waiting(rx) => rx
+                .await
+                .map_err(|_| anyhow::anyhow!("producer dropped before flush"))?,
         };
 
         let done_rx = round.done.subscribe();

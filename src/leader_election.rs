@@ -24,7 +24,7 @@ impl Epoch {
     fn from_key(key: &str) -> Result<Self> {
         let epoch = key
             .split('/')
-            .last()
+            .next_back()
             .unwrap()
             .split('.')
             .next()

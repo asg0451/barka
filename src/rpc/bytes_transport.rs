@@ -93,12 +93,12 @@ where
         total_segment_words += seg_words;
     }
 
-    if let Some(limit) = options.traversal_limit_in_words {
-        if total_segment_words > limit {
-            return Err(capnp::Error::failed(format!(
-                "message has {total_segment_words} words, exceeding traversal limit"
-            )));
-        }
+    if let Some(limit) = options.traversal_limit_in_words
+        && total_segment_words > limit
+    {
+        return Err(capnp::Error::failed(format!(
+            "message has {total_segment_words} words, exceeding traversal limit"
+        )));
     }
 
     let segment_data_bytes = total_segment_words * 8;
