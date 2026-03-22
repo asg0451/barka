@@ -1,0 +1,9 @@
+{
+  "user": "ubuntu",
+  "build": {
+    "dockerfile": "Dockerfile.cursor-cloud-agent",
+    "context": "."
+  },
+  "install": "cargo fetch && cargo build --tests",
+  "start": "sudo service docker start && (docker rm -f localstack-barka 2>/dev/null || true) && (docker image inspect localstack/localstack >/dev/null 2>&1 || docker pull localstack/localstack) && docker run -d --name localstack-barka -p 127.0.0.1:4566:4566 -e SERVICES=s3 -e DEBUG=0 localstack/localstack && ( i=0; while [ \"$i\" -lt 120 ]; do if curl -sf http://127.0.0.1:4566/_localstack/health >/dev/null; then break; fi; i=$((i+1)); sleep 1; done; curl -sf http://127.0.0.1:4566/_localstack/health >/dev/null || exit 1 )"
+}
