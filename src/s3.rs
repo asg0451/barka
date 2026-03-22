@@ -58,7 +58,10 @@ pub async fn ensure_bucket(client: &Client, bucket: &str) -> crate::error::Resul
                 .bucket(bucket)
                 .send()
                 .await
-                .map_err(|e| crate::error::Error::Storage(format!("create bucket: {e}")))?;
+                .map_err(|e| crate::error::Error::Storage {
+                    message: format!("create bucket: {e}"),
+                    backtrace: std::backtrace::Backtrace::capture(),
+                })?;
             Ok(())
         }
     }
