@@ -87,6 +87,7 @@ impl FlushRound {
     /// and collect them into the shared record list.
     ///
     /// Returns `true` if this was the last contributor (flush leader).
+    #[tracing::instrument(skip(self, message_bytes, request), fields(key = %self.key))]
     fn contribute(
         &self,
         message_bytes: &Bytes,
@@ -128,6 +129,7 @@ impl FlushRound {
 
     /// Encode the collected records as a binary segment and upload to S3 via
     /// scatter-gather (zero additional copies).
+    #[tracing::instrument(skip(self, s3_client), fields(key = %self.key, epoch = self.epoch))]
     async fn do_flush(&self, s3_client: &Client) -> Result<()> {
         let records = {
             let mut guard = self.records.lock().unwrap();
@@ -135,12 +137,22 @@ impl FlushRound {
         };
 
         let (chunks, total_len) = segment::encode_gather(self.epoch, &records);
+        tracing::debug!(
+            key = %self.key,
+            bucket = %self.bucket,
+            epoch = self.epoch,
+            records = records.len(),
+            chunks = chunks.len(),
+            total_bytes = total_len,
+            "uploading segment to S3",
+        );
         let outcome =
             s3::put_if_absent_stream(s3_client, &self.bucket, &self.key, chunks, total_len).await?;
 
         if outcome == s3::PutOutcome::AlreadyExists {
             anyhow::bail!("segment {} already exists — sequence collision", self.key);
         }
+        tracing::debug!(key = %self.key, "segment uploaded successfully");
         Ok(())
     }
 }
@@ -228,6 +240,7 @@ impl PartitionProducer {
     /// `message_bytes` is the raw `Bytes` buffer backing the capnp reader.
     /// Key/value data is extracted as zero-copy sub-slices via
     /// `Bytes::slice_ref` — no copies between the TCP read and S3 upload.
+    #[tracing::instrument(skip(self, message_bytes, request), fields(prefix = %self.prefix))]
     pub async fn apply_produce_request(
         &self,
         message_bytes: Bytes,
@@ -276,7 +289,7 @@ impl PartitionProducer {
         }
     }
 
-    /// Flush the active batch immediately (e.g. on a timer or shutdown).
+    #[tracing::instrument(skip(self), fields(prefix = %self.prefix))]
     pub async fn flush(&self) -> Result<()> {
         let done_rx = {
             let mut inner = self.inner.lock().unwrap();
