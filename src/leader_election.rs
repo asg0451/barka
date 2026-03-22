@@ -55,6 +55,14 @@ pub struct LeadershipInfo {
 }
 // TODO: methods - extend, release, ..
 
+#[derive(Debug, Clone)]
+pub struct LeaderElectionConfig {
+    pub node_id: u64,
+    pub namespace: String,
+    pub s3_config: S3Config,
+    pub validity_millis: Option<u64>,
+}
+
 pub struct LeaderElection {
     node_id: u64,
     s3_client: aws_sdk_s3::Client,
@@ -66,22 +74,22 @@ const LOCK_FILE_PREFIX: &str = "lock/";
 const VALIDITY_MILLIS: u64 = 10_000;
 
 impl LeaderElection {
-    pub async fn new<S: AsRef<str>>(node_id: u64, namespace: S, s3_config: S3Config) -> Self {
-        let s3_client = s3::build_client(&s3_config).await;
+    pub async fn new(config: LeaderElectionConfig) -> Self {
+        let s3_client = s3::build_client(&config.s3_config).await;
         let prefix = format!(
             "{}/{}/",
             LOCK_FILE_PREFIX.trim_end_matches("/"),
-            namespace.as_ref()
+            &config.namespace,
         );
         tracing::debug!(
-            node_id = node_id,
-            namespace = namespace.as_ref(),
+            node_id = config.node_id,
+            namespace = %config.namespace,
             "leader election initialized"
         );
         Self {
-            node_id,
+            node_id: config.node_id,
             s3_client,
-            bucket: s3_config.bucket.clone(),
+            bucket: config.s3_config.bucket.clone(),
             prefix,
         }
     }
@@ -109,9 +117,15 @@ impl LeaderElection {
             let lock_file: LockFile =
                 serde_json::from_reader(reader).context("deserialize lock file")?;
             // TODO: check if valid_until_ms is in the past too
-            if !lock_file.expired {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            if !lock_file.expired && lock_file.valid_until_ms > now_ms {
                 tracing::debug!(
                     leader_node_id = lock_file.node_id,
+                    valid_until_ms = lock_file.valid_until_ms,
+                    now_ms = now_ms,
                     "not becoming leader: lock file not expired"
                 );
                 return Ok(TryBecomeLeaderResult::NotLeader);
@@ -178,7 +192,13 @@ mod tests {
         let client = s3::build_client(&config).await;
         s3::ensure_bucket(&client, &bucket).await.unwrap();
 
-        let le = LeaderElection::new(1, "test-ns", config).await;
+        let le = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            namespace: "test-ns".into(),
+            s3_config: config.clone(),
+            validity_millis: Some(10_000),
+        })
+        .await;
         let result = le.try_become_leader().await.unwrap();
 
         assert!(
@@ -198,11 +218,23 @@ mod tests {
         let client = s3::build_client(&config).await;
         s3::ensure_bucket(&client, &bucket).await.unwrap();
 
-        let le1 = LeaderElection::new(1, &ns, config.clone()).await;
+        let le1 = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            namespace: ns.clone(),
+            s3_config: config.clone(),
+            validity_millis: None,
+        })
+        .await;
         let result = le1.try_become_leader().await.unwrap();
         assert!(matches!(result, TryBecomeLeaderResult::Leader(_)));
 
-        let le2 = LeaderElection::new(2, &ns, config).await;
+        let le2 = LeaderElection::new(LeaderElectionConfig {
+            node_id: 2,
+            namespace: ns.clone(),
+            s3_config: config.clone(),
+            validity_millis: None,
+        })
+        .await;
         let result = le2.try_become_leader().await.unwrap();
         assert!(
             matches!(result, TryBecomeLeaderResult::NotLeader),
