@@ -106,10 +106,16 @@ impl barka_svc::Server for PerConnectionNode {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::pin;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
     use super::*;
     use crate::node::{Node, NodeConfig};
     use crate::rpc::client::BarkaClient;
     use crate::s3::S3Config;
+
+    static STRESS_BUCKET_SEQ: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rpc_produce_consume_round_trip() {
@@ -212,5 +218,153 @@ mod tests {
         let (c, s) = tokio::join!(client, server);
         c.unwrap();
         s.unwrap();
+    }
+
+    /// Several concurrent RPC clients, each producing in batches for a few seconds on its own
+    /// topic, then consuming back and checking offsets and payloads. Requires LocalStack S3.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rpc_produce_consume_load_stress() {
+        const NUM_CLIENTS: usize = 6;
+        const RUN_SECS: u64 = 4;
+        const BATCH: usize = 40;
+        const MIN_TOTAL_RECORDS: u64 = 400;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let bucket = format!(
+            "test-rpc-stress-{}",
+            STRESS_BUCKET_SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let s3_config = S3Config {
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            bucket: bucket.clone(),
+            region: "us-east-1".into(),
+        };
+        let s3_client = crate::s3::build_client(&s3_config).await;
+        crate::s3::ensure_bucket(&s3_client, &s3_config.bucket)
+            .await
+            .unwrap();
+
+        let node = Node::new(
+            NodeConfig {
+                rpc_addr: addr,
+                ..Default::default()
+            },
+            &s3_config,
+        )
+        .await;
+
+        let server_node = node.clone();
+        let server = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async move {
+                        let mut shutdown_rx = pin!(shutdown_rx);
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = &mut shutdown_rx => {
+                                    break;
+                                }
+                                accept_res = listener.accept() => {
+                                    let (stream, _) = accept_res.unwrap();
+                                    let stream =
+                                        tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
+                                    let (reader, writer) = futures::AsyncReadExt::split(stream);
+                                    let call_bytes_queue: MessageBytesQueue =
+                                        Rc::new(RefCell::new(VecDeque::new()));
+                                    let network = BytesVatNetwork::new(
+                                        futures::io::BufReader::new(reader),
+                                        futures::io::BufWriter::new(writer),
+                                        rpc_twoparty_capnp::Side::Server,
+                                        Default::default(),
+                                        call_bytes_queue.clone(),
+                                    );
+                                    let per_conn = PerConnectionNode {
+                                        node: server_node.clone(),
+                                        msg_bytes: call_bytes_queue,
+                                    };
+                                    let client: barka_svc::Client = capnp_rpc::new_client(per_conn);
+                                    let rpc = RpcSystem::new(Box::new(network), Some(client.client));
+                                    tokio::task::spawn_local(async move {
+                                        let _ = rpc.await;
+                                    });
+                                }
+                            }
+                        }
+                    })
+                    .await;
+            });
+        });
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut client_handles = Vec::with_capacity(NUM_CLIENTS);
+        for client_id in 0..NUM_CLIENTS {
+            client_handles.push(tokio::task::spawn_blocking(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let local = tokio::task::LocalSet::new();
+                    local
+                        .run_until(async {
+                            let client = BarkaClient::connect(addr).await.unwrap();
+                            let topic = format!("load-stress-{client_id}");
+                            let deadline = Instant::now() + Duration::from_secs(RUN_SECS);
+                            let mut next_seq: u64 = 0;
+                            let mut expected_base: u64 = 0;
+
+                            while Instant::now() < deadline {
+                                let batch: Vec<Vec<u8>> = (0..BATCH)
+                                    .map(|i| {
+                                        format!("c{client_id}-{}", next_seq + i as u64).into_bytes()
+                                    })
+                                    .collect();
+                                let base = client
+                                    .produce(&topic, 0, batch)
+                                    .await
+                                    .unwrap();
+                                assert_eq!(base, expected_base);
+                                next_seq += BATCH as u64;
+                                expected_base += BATCH as u64;
+                            }
+
+                            assert!(
+                                next_seq >= MIN_TOTAL_RECORDS,
+                                "client {client_id} produced only {next_seq} records in {RUN_SECS}s"
+                            );
+
+                            let records = client
+                                .consume(&topic, 0, 0, next_seq as u32)
+                                .await
+                                .unwrap();
+                            assert_eq!(records.len() as u64, next_seq);
+                            for (i, r) in records.iter().enumerate() {
+                                assert_eq!(r.offset, i as u64);
+                                let want =
+                                    format!("c{client_id}-{}", i as u64).into_bytes();
+                                assert_eq!(r.value, want);
+                            }
+                        })
+                        .await;
+                });
+            }));
+        }
+
+        for h in client_handles {
+            h.await.unwrap();
+        }
+
+        let _ = shutdown_tx.send(());
+        server.await.unwrap();
     }
 }
