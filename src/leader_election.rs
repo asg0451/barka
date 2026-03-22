@@ -106,7 +106,7 @@ impl LeaderElection {
     // also we probably want a background process deleting old lock files..
     #[tracing::instrument(skip_all, fields(node_id = self.node_id, prefix = self.prefix, bucket = self.bucket), err, ret)]
     pub async fn try_become_leader(&self) -> Result<TryBecomeLeaderResult> {
-        let contents = s3::list_objects(&self.s3_client, &self.bucket, LOCK_FILE_PREFIX).await?;
+        let contents = s3::list_objects(&self.s3_client, &self.bucket, &self.prefix).await?;
 
         let mut last_epoch = None;
         if !contents.is_empty() {
@@ -122,10 +122,21 @@ impl LeaderElection {
                 .unwrap()
                 .as_millis() as u64;
             if !lock_file.expired && lock_file.valid_until_ms > now_ms {
+                if lock_file.node_id == self.node_id {
+                    tracing::debug!(
+                        valid_until_ms = lock_file.valid_until_ms,
+                        now_ms,
+                        "still leader"
+                    );
+                    return Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
+                        valid_until_ms: lock_file.valid_until_ms,
+                        epoch: last_epoch.unwrap(),
+                    }));
+                }
                 tracing::debug!(
                     leader_node_id = lock_file.node_id,
                     valid_until_ms = lock_file.valid_until_ms,
-                    now_ms = now_ms,
+                    now_ms,
                     "not becoming leader: lock file not expired"
                 );
                 return Ok(TryBecomeLeaderResult::NotLeader);
@@ -178,11 +189,14 @@ mod tests {
     }
 
     fn unique_name(prefix: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        format!("{prefix}-{ts}")
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}-{ts}-{n}")
     }
 
     #[tokio::test]
@@ -239,6 +253,273 @@ mod tests {
         assert!(
             matches!(result, TryBecomeLeaderResult::NotLeader),
             "second node should not become leader"
+        );
+    }
+
+    fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    fn lock_prefix(namespace: &str) -> String {
+        format!("{}{}/", LOCK_FILE_PREFIX, namespace)
+    }
+
+    /// Unconditionally write a lock file to S3, bypassing the leader election
+    /// protocol. Used to set up preconditions (e.g. expired locks).
+    async fn write_lock_file_direct(
+        client: &aws_sdk_s3::Client,
+        bucket: &str,
+        namespace: &str,
+        epoch: Epoch,
+        lock_file: &LockFile,
+    ) {
+        use aws_sdk_s3::primitives::{ByteStream, SdkBody};
+        let key = epoch.to_key(&lock_prefix(namespace));
+        let body = serde_json::to_string(lock_file).unwrap();
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(&key)
+            .body(ByteStream::from(SdkBody::from(body)))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_same_leader_not_reacquired_while_valid() {
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let le = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            namespace: ns,
+            s3_config: config,
+            validity_millis: None,
+        })
+        .await;
+
+        let result = le.try_become_leader().await.unwrap();
+        assert!(matches!(result, TryBecomeLeaderResult::Leader(_)));
+
+        let result = le.try_become_leader().await.unwrap();
+        assert!(
+            matches!(result, TryBecomeLeaderResult::Leader(_)),
+            "same node should still be recognized as leader: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_leader_acquired_after_time_expiry() {
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(1),
+            &LockFile {
+                valid_until_ms: now_ms() - 60_000,
+                expired: false,
+                node_id: 42,
+            },
+        )
+        .await;
+
+        let le = LeaderElection::new(LeaderElectionConfig {
+            node_id: 2,
+            namespace: ns,
+            s3_config: config,
+            validity_millis: None,
+        })
+        .await;
+
+        let result = le.try_become_leader().await.unwrap();
+        assert!(
+            matches!(result, TryBecomeLeaderResult::Leader(ref info) if info.epoch == Epoch(2)),
+            "should become leader at epoch 2 after time-based expiry: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_leader_acquired_after_manual_expiry() {
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(5),
+            &LockFile {
+                valid_until_ms: now_ms() + 600_000,
+                expired: true,
+                node_id: 42,
+            },
+        )
+        .await;
+
+        let le = LeaderElection::new(LeaderElectionConfig {
+            node_id: 3,
+            namespace: ns,
+            s3_config: config,
+            validity_millis: None,
+        })
+        .await;
+
+        let result = le.try_become_leader().await.unwrap();
+        assert!(
+            matches!(result, TryBecomeLeaderResult::Leader(ref info) if info.epoch == Epoch(6)),
+            "should become leader at epoch 6 after manual expiry: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_epoch_advances_past_highest_lock() {
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        for e in 1..=4u64 {
+            write_lock_file_direct(
+                &client,
+                &bucket,
+                &ns,
+                Epoch(e),
+                &LockFile {
+                    valid_until_ms: now_ms() - 1_000,
+                    expired: false,
+                    node_id: 99,
+                },
+            )
+            .await;
+        }
+
+        let le = LeaderElection::new(LeaderElectionConfig {
+            node_id: 7,
+            namespace: ns,
+            s3_config: config,
+            validity_millis: None,
+        })
+        .await;
+
+        let result = le.try_become_leader().await.unwrap();
+        assert!(
+            matches!(result, TryBecomeLeaderResult::Leader(ref info) if info.epoch == Epoch(5)),
+            "should create epoch 5 (one past the highest existing lock): {result:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_racing_nodes_one_leader_empty_bucket() {
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        const NUM_NODES: usize = 5;
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(NUM_NODES));
+
+        let mut handles = Vec::with_capacity(NUM_NODES);
+        for i in 0..NUM_NODES {
+            let config = config.clone();
+            let ns = ns.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                let le = LeaderElection::new(LeaderElectionConfig {
+                    node_id: i as u64,
+                    namespace: ns,
+                    s3_config: config,
+                    validity_millis: None,
+                })
+                .await;
+                barrier.wait().await;
+                le.try_become_leader().await.unwrap()
+            }));
+        }
+
+        let mut leaders = 0usize;
+        for handle in handles {
+            if matches!(handle.await.unwrap(), TryBecomeLeaderResult::Leader(_)) {
+                leaders += 1;
+            }
+        }
+        assert_eq!(leaders, 1, "exactly one node should become leader");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_racing_nodes_one_leader_after_expiry() {
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(3),
+            &LockFile {
+                valid_until_ms: now_ms() - 60_000,
+                expired: false,
+                node_id: 99,
+            },
+        )
+        .await;
+
+        const NUM_NODES: usize = 5;
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(NUM_NODES));
+
+        let mut handles = Vec::with_capacity(NUM_NODES);
+        for i in 0..NUM_NODES {
+            let config = config.clone();
+            let ns = ns.clone();
+            let barrier = barrier.clone();
+            handles.push(tokio::spawn(async move {
+                let le = LeaderElection::new(LeaderElectionConfig {
+                    node_id: i as u64,
+                    namespace: ns,
+                    s3_config: config,
+                    validity_millis: None,
+                })
+                .await;
+                barrier.wait().await;
+                le.try_become_leader().await.unwrap()
+            }));
+        }
+
+        let mut leader_epochs = vec![];
+        for handle in handles {
+            if let TryBecomeLeaderResult::Leader(info) = handle.await.unwrap() {
+                leader_epochs.push(info.epoch);
+            }
+        }
+        assert_eq!(
+            leader_epochs.len(),
+            1,
+            "exactly one node should become leader"
+        );
+        assert_eq!(
+            leader_epochs[0],
+            Epoch(4),
+            "new epoch should be one past the expired lock"
         );
     }
 }
