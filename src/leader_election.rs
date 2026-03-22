@@ -1,13 +1,9 @@
 // based on https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/
 
-use anyhow::{Context, Result, bail};
-use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
-use aws_sdk_s3::operation::put_object::PutObjectError;
-use aws_sdk_s3::primitives::{ByteStream, SdkBody};
-use bytes::Buf;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::s3::{self, S3Config};
+use crate::s3::{self, PutOutcome, S3Config};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LockFile {
@@ -26,10 +22,14 @@ pub struct Epoch(u64);
 impl Epoch {
     // format: {prefix}/{epoch}.lock
     fn from_key(prefix: &str, key: &str) -> Result<Self> {
-        let key = key.strip_prefix(prefix).unwrap();
-        // let epoch = key.split('.').last().ok_or()?.parse::<u64>()?;
-        // Ok(Self(epoch))
-        todo!()
+        let bad_key = || anyhow::anyhow!("invalid lock file key: {key}");
+        let key = key.strip_prefix(prefix).with_context(bad_key)?;
+        let epoch = key
+            .split('.')
+            .last()
+            .and_then(|e| e.parse::<u64>().ok())
+            .with_context(bad_key)?;
+        Ok(Self(epoch))
     }
     fn to_key(self, prefix: &str) -> String {
         format!("{}/{}.lock", prefix, self.0)
@@ -63,74 +63,6 @@ pub struct LeaderElection {
 const LOCK_FILE_PREFIX: &str = "lock/";
 const VALIDITY_MILLIS: u64 = 10_000;
 
-const RETRY_MAX: u32 = 4;
-const RETRY_BASE_MS: u64 = 50;
-const RETRY_CAP_MS: u64 = 2_000;
-
-enum RetryResult<T> {
-    Done(T),
-    Retry(anyhow::Error),
-    Fail(anyhow::Error),
-}
-
-#[tracing::instrument(skip_all, fields(op), err)]
-async fn retry_with_backoff<T, Fut, F>(op: &str, mut f: F) -> anyhow::Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = RetryResult<T>>,
-{
-    let mut attempt = 0u32;
-    loop {
-        let span = tracing::info_span!("retry_attempt", %op, attempt);
-        match tracing::Instrument::instrument(f(), span).await {
-            RetryResult::Done(v) => return Ok(v),
-            RetryResult::Fail(e) => return Err(e),
-            RetryResult::Retry(e) => {
-                attempt += 1;
-                if attempt > RETRY_MAX {
-                    return Err(e.context(format!("{op}: exhausted {RETRY_MAX} retries")));
-                }
-                let delay = backoff_delay(attempt);
-                tracing::warn!(
-                    attempt,
-                    max = RETRY_MAX,
-                    delay_ms = delay.as_millis() as u64,
-                    error = %e,
-                    "{op}: retrying",
-                );
-                tokio::time::sleep(delay).await;
-            }
-        }
-    }
-}
-
-fn backoff_delay(attempt: u32) -> std::time::Duration {
-    let exp = RETRY_BASE_MS.saturating_mul(1u64 << attempt.min(10));
-    let jitter = cheap_jitter_ms(exp);
-    let ms = (RETRY_BASE_MS + jitter).min(RETRY_CAP_MS);
-    std::time::Duration::from_millis(ms)
-}
-
-/// Sub-millisecond jitter sourced from the system clock. Only needs to
-/// desynchronize concurrent retriers, not be cryptographically random.
-fn cheap_jitter_ms(max: u64) -> u64 {
-    if max == 0 {
-        return 0;
-    }
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos() as u64;
-    nanos % max
-}
-
-fn is_transient_s3_error<E>(err: &SdkError<E>) -> bool {
-    match err.raw_response() {
-        Some(raw) => matches!(raw.status().as_u16(), 429 | 500 | 502 | 503 | 504),
-        None => true,
-    }
-}
-
 impl LeaderElection {
     pub async fn new<S: AsRef<str>>(node_id: u64, namespace: S, s3_config: S3Config) -> Self {
         let s3_client = s3::build_client(&s3_config).await;
@@ -160,57 +92,21 @@ impl LeaderElection {
     // also we probably want a background process deleting old lock files..
     #[tracing::instrument(skip_all, fields(node_id = self.node_id, prefix = self.prefix, bucket = self.bucket), err, ret)]
     pub async fn try_become_leader(&self) -> Result<TryBecomeLeaderResult> {
-        let lock_files = retry_with_backoff("list lock files", || {
-            let client = self.s3_client.clone();
-            let bucket = self.bucket.clone();
-            async move {
-                match client
-                    .list_objects_v2()
-                    .bucket(&bucket)
-                    .prefix(LOCK_FILE_PREFIX)
-                    .send()
-                    .await
-                {
-                    Ok(v) => RetryResult::Done(v),
-                    Err(e) if is_transient_s3_error(&e) => {
-                        RetryResult::Retry(anyhow::anyhow!(e).context("s3: list lock files"))
-                    }
-                    Err(e) => RetryResult::Fail(anyhow::anyhow!(e).context("s3: list lock files")),
-                }
-            }
-        })
-        .await?;
-
-        if lock_files.continuation_token.is_some() {
-            bail!("leader election: too many lock files (paginated response)");
-        }
-        let contents = lock_files.contents.unwrap_or_default();
+        let contents =
+            s3::list_objects(&self.s3_client, &self.bucket, LOCK_FILE_PREFIX).await?;
 
         let mut last_epoch = None;
         if !contents.is_empty() {
-            let newest_lock_file = contents.last().unwrap();
-            last_epoch = Some(Epoch::from_key(
-                &self.prefix,
-                newest_lock_file.key().unwrap(),
-            )?);
-            let newest_lock_file = self
-                .s3_client
-                .get_object()
-                .bucket(&self.bucket)
-                .key(newest_lock_file.key().unwrap())
-                .send()
-                .await
-                .context("s3: get lock file")?
-                .body
-                .collect()
-                .await
-                .context("s3: read lock file body")?;
-            let newest_lock_file: LockFile = serde_json::from_reader(newest_lock_file.reader())
-                .context("deserialize lock file")?;
+            let newest = contents.last().unwrap();
+            let key = newest.key().unwrap();
+            last_epoch = Some(Epoch::from_key(&self.prefix, key)?);
+            let reader = s3::get_object_reader(&self.s3_client, &self.bucket, key).await?;
+            let lock_file: LockFile =
+                serde_json::from_reader(reader).context("deserialize lock file")?;
             // TODO: check if valid_until_ms is in the past too
-            if !newest_lock_file.expired {
+            if !lock_file.expired {
                 tracing::debug!(
-                    leader_node_id = newest_lock_file.node_id,
+                    leader_node_id = lock_file.node_id,
                     "not becoming leader: lock file not expired"
                 );
                 return Ok(TryBecomeLeaderResult::NotLeader);
@@ -231,79 +127,22 @@ impl LeaderElection {
         .unwrap();
 
         let epoch = last_epoch.unwrap_or(Epoch(0)).next();
-        let lock_file_key = epoch.to_key(&self.prefix);
+        let key = epoch.to_key(&self.prefix);
 
-        retry_with_backoff("create lock file", || {
-            let client = self.s3_client.clone();
-            let bucket = self.bucket.clone();
-            let body = lock_file_body.clone();
-            let key = lock_file_key.clone();
-            async move {
-                match client
-                    .put_object()
-                    .bucket(&bucket)
-                    .key(key)
-                    .body(ByteStream::from(SdkBody::from(body)))
-                    .if_none_match("*")
-                    .send()
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(epoch = epoch.0, "became leader");
-                        RetryResult::Done(TryBecomeLeaderResult::Leader(LeadershipInfo {
-                            valid_until_ms,
-                            epoch,
-                        }))
-                    }
-                    Err(e) => match classify_put_if_absent_error(&e) {
-                        Some(S3CASOutcome::AlreadyExists) => {
-                            tracing::debug!("lock file already exists, not becoming leader");
-                            RetryResult::Done(TryBecomeLeaderResult::NotLeader)
-                        }
-                        Some(S3CASOutcome::RetryableConflict) => {
-                            tracing::debug!("retryable CAS conflict");
-                            RetryResult::Retry(anyhow::anyhow!(e))
-                        }
-                        None if is_transient_s3_error(&e) => {
-                            RetryResult::Retry(anyhow::anyhow!(e).context("s3: create lock file"))
-                        }
-                        None => {
-                            RetryResult::Fail(anyhow::anyhow!(e).context("s3: create lock file"))
-                        }
-                    },
-                }
+        match s3::put_if_absent(&self.s3_client, &self.bucket, &key, lock_file_body).await? {
+            PutOutcome::Created => {
+                tracing::info!(epoch = epoch.0, "became leader");
+                Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
+                    valid_until_ms,
+                    epoch,
+                }))
             }
-        })
-        .await
-    }
-}
-
-enum S3CASOutcome {
-    AlreadyExists,
-    RetryableConflict,
-}
-
-fn classify_put_if_absent_error(err: &SdkError<PutObjectError>) -> Option<S3CASOutcome> {
-    let status = err.raw_response().map(|r| r.status().as_u16());
-    let code = err.code();
-
-    if status == Some(412) {
-        return Some(S3CASOutcome::AlreadyExists);
-    }
-    if status == Some(409) {
-        return Some(S3CASOutcome::RetryableConflict);
-    }
-
-    if let Some(c) = code {
-        if c == "PreconditionFailed" {
-            return Some(S3CASOutcome::AlreadyExists);
-        }
-        if c == "ConditionalRequestConflict" {
-            return Some(S3CASOutcome::RetryableConflict);
+            PutOutcome::AlreadyExists => {
+                tracing::debug!("lock file already exists, not becoming leader");
+                Ok(TryBecomeLeaderResult::NotLeader)
+            }
         }
     }
-
-    None
 }
 
 #[cfg(test)]
