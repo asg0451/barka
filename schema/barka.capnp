@@ -28,6 +28,11 @@ struct ConsumeResponse {
   records @0 :List(Record);
 }
 
+struct SegmentData {
+  epoch   @0 :UInt64;
+  records @1 :List(Record);
+}
+
 interface BarkaSvc {
   produce @0 (request :ProduceRequest) -> (response :ProduceResponse);
   consume @1 (request :ConsumeRequest) -> (response :ConsumeResponse);

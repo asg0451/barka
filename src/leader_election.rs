@@ -163,7 +163,7 @@ impl LeaderElection {
             .filter_map(|obj| obj.key().map(str::to_owned))
             .collect();
 
-        match s3::put_if_absent(&self.s3_client, &self.bucket, &key, lock_file_body).await? {
+        match s3::put_if_absent(&self.s3_client, &self.bucket, &key, lock_file_body.into()).await? {
             PutOutcome::Created => {
                 tracing::info!(epoch = epoch.0, "became leader");
                 // clean up old lock files

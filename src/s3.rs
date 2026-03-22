@@ -330,7 +330,7 @@ pub async fn put_if_absent(
     client: &Client,
     bucket: &str,
     key: &str,
-    body: String,
+    body: bytes::Bytes,
 ) -> Result<PutOutcome> {
     retry_with_backoff("put if absent", || {
         let client = client.clone();
