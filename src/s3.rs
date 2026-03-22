@@ -33,16 +33,6 @@ impl Default for S3Config {
     }
 }
 
-impl S3Config {
-    pub fn from_env() -> Self {
-        Self {
-            endpoint_url: std::env::var("AWS_ENDPOINT_URL").ok(),
-            bucket: std::env::var("BARKA_S3_BUCKET").unwrap_or_else(|_| DEFAULT_BUCKET.into()),
-            region: std::env::var("AWS_REGION").unwrap_or_else(|_| DEFAULT_REGION.into()),
-        }
-    }
-}
-
 /// Build an S3 client. Points at LocalStack when `config.endpoint_url` is set.
 #[tracing::instrument(skip_all)]
 pub async fn build_client(config: &S3Config) -> Client {
