@@ -38,6 +38,7 @@ pub struct Node {
 
 impl Node {
     pub async fn new(config: NodeConfig, s3_config: &S3Config) -> Self {
+        // TODO: this is a hack around not using up to date sequence numbers yet.
         let prefix = format!(
             "data/test/0/{}",
             std::time::SystemTime::now()
@@ -87,7 +88,10 @@ impl Node {
 
     /// Apply a Cap'n Proto [`produce_request::Reader`]: read key/value as slices from the
     /// inbound message and copy once per field into partition storage.
-    pub fn apply_produce_request(&self, request: produce_request::Reader<'_>) -> capnp::Result<u64> {
+    pub fn apply_produce_request(
+        &self,
+        request: produce_request::Reader<'_>,
+    ) -> capnp::Result<u64> {
         let topic = request.get_topic()?.to_string()?;
         let partition = request.get_partition();
         let records = request.get_records()?;

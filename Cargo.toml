@@ -18,6 +18,7 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
+base64 = "0.22"
 aws-sdk-s3 = "1"
 aws-config = "1"
 aws-smithy-types = { version = "1", features = ["http-body-0-4-x"] }

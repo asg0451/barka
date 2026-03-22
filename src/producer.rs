@@ -170,7 +170,7 @@ async fn await_flush_done(mut rx: watch::Receiver<Option<Result<(), String>>>) -
 
 const DEFAULT_MAX_RECORDS: usize = 100;
 const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
-const DEFAULT_LINGER: Duration = Duration::from_millis(100);
+const DEFAULT_LINGER: Duration = Duration::from_millis(1000);
 
 pub struct PartitionProducer {
     s3_client: Client,
@@ -231,7 +231,7 @@ impl PartitionProducer {
 
     fn create_flush_round(&self, participants: usize) -> Arc<FlushRound> {
         let seq = self.next_sequence.fetch_add(1, Ordering::Relaxed);
-        let key = format!("{}/{:020}", self.prefix, seq);
+        let key = format!("{}/{:020}.dat", self.prefix, seq);
         Arc::new(FlushRound::new(
             participants,
             0, // epoch TBD
