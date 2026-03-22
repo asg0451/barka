@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info};
 
-use crate::node::Node;
+use crate::node::{Node, ProduceInput};
 use crate::rpc::barka_capnp::barka_svc;
 
 pub async fn serve_rpc(node: Node, addr: SocketAddr) -> anyhow::Result<()> {
@@ -61,30 +61,27 @@ impl barka_svc::Server for Node {
         let partition = req.get_partition();
         let records = req.get_records()?;
 
-        let tp = (topic, partition);
-        let mut partitions = self.partitions.lock().unwrap();
-        let part = partitions
-            .entry(tp)
-            .or_insert_with(|| crate::log::partition::Partition::new(partition));
-
-        let mut base_offset = None;
+        let mut inputs = Vec::with_capacity(records.len() as usize);
         for record in records.iter() {
-            let value = record.get_value()?.to_vec();
-            let key = {
-                let k = record.get_key()?;
-                if k.is_empty() { None } else { Some(k.to_vec()) }
-            };
-            let ts = record.get_timestamp();
-            let off = part.append(key, value, ts);
-            if base_offset.is_none() {
-                base_offset = Some(off);
-            }
+            inputs.push(ProduceInput {
+                key: {
+                    let k = record.get_key()?;
+                    if k.is_empty() {
+                        None
+                    } else {
+                        Some(k.to_vec())
+                    }
+                },
+                value: record.get_value()?.to_vec(),
+                timestamp: record.get_timestamp(),
+            });
         }
+        let base_offset = self.produce_records(topic, partition, inputs);
 
         results
             .get()
             .get_response()?
-            .set_base_offset(base_offset.unwrap_or(0));
+            .set_base_offset(base_offset);
         Ok(())
     }
 
@@ -99,12 +96,7 @@ impl barka_svc::Server for Node {
         let offset = req.get_offset();
         let max = req.get_max_records();
 
-        let tp = (topic, partition);
-        let partitions = self.partitions.lock().unwrap();
-        let records = partitions
-            .get(&tp)
-            .map(|p| p.read(offset, max))
-            .unwrap_or_default();
+        let records = self.consume_records(topic, partition, offset, max);
 
         let resp = results.get().get_response()?;
         let mut list = resp.init_records(records.len() as u32);

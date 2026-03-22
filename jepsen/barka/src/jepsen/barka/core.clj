@@ -61,7 +61,7 @@
   [conn consume-offset]
   (reify client/Client
     (open! [this test node]
-      (barka-client (barka/open "127.0.0.1" (db/control-port-for node))
+      (barka-client (barka/open "127.0.0.1" (db/jepsen-gateway-port-for node))
                     (:consume-offset test)))
 
     (setup! [this test])

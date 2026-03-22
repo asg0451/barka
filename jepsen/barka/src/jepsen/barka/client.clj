@@ -1,5 +1,5 @@
 (ns jepsen.barka.client
-  "TCP/JSON client for barka's control API.
+  "TCP/JSON client for barka's Jepsen API gateway.
 
    Protocol: newline-delimited JSON over TCP.
    Send: {\"op\":\"produce\",\"partition\":0,\"value\":\"hello\"}
@@ -10,7 +10,7 @@
            (java.net Socket)))
 
 (defn open
-  "Opens a TCP connection to a barka node's control port.
+  "Opens a TCP connection to a barka node's Jepsen gateway port.
    Returns a map with :socket, :in (BufferedReader), :out (PrintWriter)."
   [host port]
   (let [sock (Socket. ^String host ^int port)

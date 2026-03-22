@@ -2,22 +2,27 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
-use tracing::info;
-
+use crate::jepsen_gateway;
 use crate::log::partition::Partition;
+use crate::log::record::Record;
 use crate::rpc::server::serve_rpc;
+
+/// One record to append (shared by Cap'n Proto and the Jepsen JSON gateway).
+#[derive(Debug)]
+pub struct ProduceInput {
+    pub key: Option<Vec<u8>>,
+    pub value: Vec<u8>,
+    pub timestamp: i64,
+}
 
 /// (topic, partition_id)
 pub type TopicPartition = (String, u32);
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NodeConfig {
     pub node_id: u64,
     pub rpc_addr: SocketAddr,
-    pub control_addr: SocketAddr,
+    pub jepsen_gateway_addr: SocketAddr,
 }
 
 impl Default for NodeConfig {
@@ -25,7 +30,7 @@ impl Default for NodeConfig {
         Self {
             node_id: 0,
             rpc_addr: "127.0.0.1:9292".parse().unwrap(),
-            control_addr: "127.0.0.1:9293".parse().unwrap(),
+            jepsen_gateway_addr: "127.0.0.1:9293".parse().unwrap(),
         }
     }
 }
@@ -40,14 +45,14 @@ impl NodeConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(9292);
-        let control_port: u16 = std::env::var("BARKA_CONTROL_PORT")
+        let jepsen_gateway_port: u16 = std::env::var("BARKA_JEPSEN_GATEWAY_PORT")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(9293);
         Self {
             node_id,
             rpc_addr: ([127, 0, 0, 1], rpc_port).into(),
-            control_addr: ([127, 0, 0, 1], control_port).into(),
+            jepsen_gateway_addr: ([127, 0, 0, 1], jepsen_gateway_port).into(),
         }
     }
 }
@@ -68,10 +73,9 @@ impl Node {
 
     pub async fn serve(&self) -> anyhow::Result<()> {
         let rpc_addr = self.config.rpc_addr;
-        let control_addr = self.config.control_addr;
+        let jepsen_gateway_addr = self.config.jepsen_gateway_addr;
 
         let rpc_node = self.clone();
-        let control_node = self.clone();
 
         let rpc_handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
@@ -81,141 +85,61 @@ impl Node {
             rt.block_on(serve_rpc(rpc_node, rpc_addr))
         });
 
-        let control_handle = tokio::spawn(async move {
-            serve_control(control_node, control_addr).await
+        // Jepsen gateway is a Cap'n Proto client; same `!Send` / LocalSet constraints as `serve_rpc`.
+        let jepsen_gateway_handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(jepsen_gateway::serve(rpc_addr, jepsen_gateway_addr))
         });
 
         tokio::select! {
-            result = control_handle => result.unwrap()?,
+            c = tokio::task::spawn_blocking(move || jepsen_gateway_handle.join()) => {
+                c.unwrap().unwrap()?;
+            }
             _ = tokio::task::spawn_blocking(move || rpc_handle.join().unwrap()) => {},
         };
         Ok(())
     }
-}
 
-/// JSON-over-TCP control API for Jepsen.
-///
-/// Protocol: newline-delimited JSON.
-///   Request:  {"op":"produce","topic":"events","partition":0,"value":"hello"}
-///             {"op":"consume","topic":"events","partition":0,"offset":0,"max":10}
-///   Response: {"ok":true,"offset":0}
-///             {"ok":true,"values":["hello"]}
-///             {"ok":false,"error":"..."}
-async fn serve_control(node: Node, addr: SocketAddr) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
-    info!(%addr, "control api listening");
+    /// Append records to `(topic, partition)`; returns base offset of the first record,
+    /// or `0` if `records` is empty (matches Cap'n Proto response shape).
+    pub fn produce_records(
+        &self,
+        topic: String,
+        partition: u32,
+        records: impl IntoIterator<Item = ProduceInput>,
+    ) -> u64 {
+        let tp = (topic, partition);
+        let mut partitions = self.partitions.lock().unwrap();
+        let part = partitions
+            .entry(tp)
+            .or_insert_with(|| Partition::new(partition));
 
-    loop {
-        let (stream, remote) = listener.accept().await?;
-        info!(%remote, "control connection");
-        let node = node.clone();
-
-        tokio::spawn(async move {
-            let (reader, mut writer) = stream.into_split();
-            let mut lines = BufReader::new(reader).lines();
-
-            while let Ok(Some(line)) = lines.next_line().await {
-                let response = handle_control_request(&node, &line);
-                let mut out = serde_json::to_string(&response).unwrap();
-                out.push('\n');
-                if writer.write_all(out.as_bytes()).await.is_err() {
-                    break;
-                }
+        let mut base_offset = None;
+        for r in records {
+            let off = part.append(r.key, r.value, r.timestamp);
+            if base_offset.is_none() {
+                base_offset = Some(off);
             }
-        });
+        }
+        base_offset.unwrap_or(0)
     }
-}
 
-#[derive(Deserialize)]
-struct ControlRequest {
-    op: String,
-    #[serde(default = "default_topic")]
-    topic: String,
-    #[serde(default)]
-    partition: u32,
-    #[serde(default)]
-    value: Option<String>,
-    #[serde(default)]
-    offset: u64,
-    #[serde(default = "default_max")]
-    max: u32,
-}
-
-fn default_topic() -> String {
-    "default".into()
-}
-
-fn default_max() -> u32 {
-    10
-}
-
-#[derive(Serialize)]
-struct ControlResponse {
-    ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    offset: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    values: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-fn handle_control_request(node: &Node, line: &str) -> ControlResponse {
-    let req: ControlRequest = match serde_json::from_str(line) {
-        Ok(r) => r,
-        Err(e) => {
-            return ControlResponse {
-                ok: false,
-                offset: None,
-                values: None,
-                error: Some(format!("bad request: {e}")),
-            };
-        }
-    };
-
-    let tp = (req.topic.clone(), req.partition);
-
-    match req.op.as_str() {
-        "produce" => {
-            let value = req.value.unwrap_or_default();
-            let ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as i64;
-            let mut partitions = node.partitions.lock().unwrap();
-            let part = partitions
-                .entry(tp)
-                .or_insert_with(|| Partition::new(req.partition));
-            let offset = part.append(None, value.into_bytes(), ts);
-            ControlResponse {
-                ok: true,
-                offset: Some(offset),
-                values: None,
-                error: None,
-            }
-        }
-        "consume" => {
-            let partitions = node.partitions.lock().unwrap();
-            let records = partitions
-                .get(&tp)
-                .map(|p| p.read(req.offset, req.max))
-                .unwrap_or_default();
-            let values: Vec<String> = records
-                .iter()
-                .map(|r| String::from_utf8_lossy(&r.value).to_string())
-                .collect();
-            ControlResponse {
-                ok: true,
-                offset: None,
-                values: Some(values),
-                error: None,
-            }
-        }
-        other => ControlResponse {
-            ok: false,
-            offset: None,
-            values: None,
-            error: Some(format!("unknown op: {other}")),
-        },
+    /// Read up to `max` records from `offset` onward.
+    pub fn consume_records(
+        &self,
+        topic: String,
+        partition: u32,
+        offset: u64,
+        max: u32,
+    ) -> Vec<Record> {
+        let tp = (topic, partition);
+        let partitions = self.partitions.lock().unwrap();
+        partitions
+            .get(&tp)
+            .map(|p| p.read(offset, max))
+            .unwrap_or_default()
     }
 }

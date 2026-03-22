@@ -11,7 +11,7 @@ Kafka-like distributed log with an S3 backend. Ephemeral nodes coordinate partit
 ```bash
 cargo build                # build (requires `capnp` compiler installed: apt install capnproto)
 cargo check                # type-check only
-RUST_LOG=info cargo run    # start a node (capnp-rpc on :9292, control API on :9293)
+RUST_LOG=info cargo run    # start a node (capnp-rpc on :9292, Jepsen gateway on :9293)
 ```
 
 ### Jepsen Tests
@@ -21,13 +21,13 @@ cd jepsen/barka
 CLASSPATH= lein run test --barka-bin /path/to/target/debug/barka
 ```
 
-Jepsen runs locally (no SSH/VMs needed) — starts barka as a subprocess, sends produce/consume ops via the JSON control API, then checks queue ordering invariants. Currently expected to report `:valid? false` since the storage backend is a stub.
+Jepsen runs locally (no SSH/VMs needed) — starts barka as a subprocess, sends produce/consume ops via the **Jepsen API gateway** (newline JSON over TCP), then checks queue ordering invariants. Currently expected to report `:valid? false` since the storage backend is a stub.
 
 ## Architecture
 
-Two communication layers:
+Two communication layers (same backend; the gateway is a frontend only):
 - **Cap'n Proto RPC** (port 9292): The real client protocol. Schema in `schema/barka.capnp`, compiled by `build.rs` with `default_parent_module(["rpc"])` so generated code lives at `crate::rpc::barka_capnp`. capnp-rpc is `!Send`, so the RPC server runs on a dedicated thread with its own single-threaded tokio runtime and `LocalSet`.
-- **JSON control API** (port 9293): Newline-delimited JSON over TCP. Exists for Jepsen to drive the system. Protocol: `{"op":"produce","topic":"...","partition":0,"value":"..."}` / `{"op":"consume","topic":"...","partition":0,"offset":0,"max":10}`.
+- **Jepsen API gateway** (port 9293, env `BARKA_JEPSEN_GATEWAY_PORT`): Newline-delimited JSON over TCP for Jepsen. Implementation in `src/jepsen_gateway.rs`: translates each line to [`BarkaClient`](src/rpc/client.rs) Cap'n Proto calls to the node's RPC address (retries until the RPC listener is up). Runs on its own dedicated `current_thread` runtime + `LocalSet` for the same `!Send` reasons as the RPC server. Protocol: `{"op":"produce","topic":"...","partition":0,"value":"..."}` / `{"op":"consume","topic":"...","partition":0,"offset":0,"max":10}`.
 
 ### Key design decisions
 - **Storage is a black box**: `src/storage.rs` is an opaque trait — intentionally has no implementation details.
@@ -48,6 +48,6 @@ Two communication layers:
 - Race-condition tests use `#[tokio::test(flavor = "multi_thread")]` with `tokio::sync::Barrier` to synchronize concurrent `try_become_leader` calls.
 
 ### Jepsen test structure (`jepsen/barka/`)
-- `db.clj` — starts/stops barka as a local process, waits for control port
-- `client.clj` — TCP/JSON client that talks to the control API
+- `db.clj` — starts/stops barka as a local process, waits for the Jepsen gateway port
+- `client.clj` — TCP/JSON client for the Jepsen gateway
 - `core.clj` — test definition with produce/consume generator and `log-checker` that validates ordering and completeness

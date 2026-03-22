@@ -1,5 +1,6 @@
 pub mod error;
 pub mod lease;
+pub mod jepsen_gateway;
 pub mod log;
 pub mod node;
 pub mod rpc;

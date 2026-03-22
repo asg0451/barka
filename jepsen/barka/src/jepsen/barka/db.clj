@@ -3,7 +3,7 @@
    Assumes LocalStack is already running (started via `make localstack`).
 
    Multi-node: each node gets its own barka process on a unique port pair.
-   n1 → rpc 9292 / control 9293, n2 → rpc 9294 / control 9295, etc."
+   n1 → rpc 9292 / jepsen gateway 9293, n2 → rpc 9294 / jepsen gateway 9295, etc."
   (:require [clojure.tools.logging :refer [info warn]]
             [jepsen.db :as db])
   (:import (java.net Socket InetSocketAddress HttpURLConnection URL)))
@@ -13,7 +13,7 @@
   "barka")
 
 (def base-rpc-port 9292)
-(def base-control-port 9293)
+(def base-jepsen-gateway-port 9293)
 
 (defn node-idx
   "0-based index from node name, e.g. \"n1\" → 0, \"n2\" → 1."
@@ -23,8 +23,8 @@
 (defn rpc-port-for [node]
   (+ base-rpc-port (* 2 (node-idx node))))
 
-(defn control-port-for [node]
-  (+ base-control-port (* 2 (node-idx node))))
+(defn jepsen-gateway-port-for [node]
+  (+ base-jepsen-gateway-port (* 2 (node-idx node))))
 
 (def localstack-port
   "LocalStack gateway port."
@@ -76,10 +76,10 @@
     (reify db/DB
       (setup! [_ test node]
         (wait-for "localstack S3" localstack-s3-ready? 200 10)
-        (let [rpc-port  (rpc-port-for node)
-              ctrl-port (control-port-for node)
-              idx       (node-idx node)]
-          (info "starting barka" node "rpc=" rpc-port "control=" ctrl-port)
+        (let [rpc-port (rpc-port-for node)
+              gw-port  (jepsen-gateway-port-for node)
+              idx      (node-idx node)]
+          (info "starting barka" node "rpc=" rpc-port "jepsen-gateway=" gw-port)
           (let [pb (ProcessBuilder. [bin])]
             (doto (.environment pb)
               (.put "AWS_ENDPOINT_URL" localstack-endpoint)
@@ -89,11 +89,11 @@
               (.put "RUST_LOG" "info")
               (.put "BARKA_NODE_ID" (str idx))
               (.put "BARKA_RPC_PORT" (str rpc-port))
-              (.put "BARKA_CONTROL_PORT" (str ctrl-port)))
+              (.put "BARKA_JEPSEN_GATEWAY_PORT" (str gw-port)))
             (let [proc (.start pb)]
               (swap! processes assoc node proc)
-              (wait-for (str "barka control port " node)
-                        #(tcp-reachable? "127.0.0.1" ctrl-port 100)
+              (wait-for (str "barka jepsen gateway " node)
+                        #(tcp-reachable? "127.0.0.1" gw-port 100)
                         100 50)
               (info "barka ready on" node)))))
 
