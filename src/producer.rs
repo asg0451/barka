@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
-use tracing::warn;
+use tracing::{warn, Instrument};
 
 use crate::{
     log_offset::{self, compose},
@@ -384,7 +384,6 @@ impl PartitionProducer {
         }
     }
 
-    #[tracing::instrument(skip(self), fields(prefix = %self.prefix))]
     pub async fn flush(&self) -> Result<()> {
         let done_rx = {
             let mut inner = self.inner.lock().unwrap();
@@ -402,7 +401,8 @@ impl PartitionProducer {
             done_rx
         };
 
-        await_flush_done(done_rx).await
+        let span = tracing::info_span!("flush", prefix = %self.prefix);
+        await_flush_done(done_rx).instrument(span).await
     }
 }
 
