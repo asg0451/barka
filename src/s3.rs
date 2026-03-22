@@ -207,6 +207,34 @@ pub async fn get_object_reader(
     Ok(body.reader())
 }
 
+/// Unconditional put: writes `body` to `key`, overwriting any existing object.
+#[tracing::instrument(skip(client, body), err)]
+pub async fn put_object(client: &Client, bucket: &str, key: &str, body: String) -> Result<()> {
+    retry_with_backoff("put object", || {
+        let client = client.clone();
+        let bucket = bucket.to_owned();
+        let key = key.to_owned();
+        let body = body.clone();
+        async move {
+            match client
+                .put_object()
+                .bucket(&bucket)
+                .key(key)
+                .body(ByteStream::from(SdkBody::from(body)))
+                .send()
+                .await
+            {
+                Ok(_) => RetryResult::Done(()),
+                Err(e) if is_transient_s3_error(&e) => {
+                    RetryResult::Retry(anyhow::anyhow!(e).context("s3: put object"))
+                }
+                Err(e) => RetryResult::Fail(anyhow::anyhow!(e).context("s3: put object")),
+            }
+        }
+    })
+    .await
+}
+
 /// Batch-delete objects by key. Silently succeeds on an empty list.
 /// Keys are capped at 1 000 per the S3 DeleteObjects API (matches our
 /// list_objects cap, so callers that list-then-delete are always safe).

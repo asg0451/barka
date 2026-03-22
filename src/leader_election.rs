@@ -53,7 +53,6 @@ pub struct LeadershipInfo {
     pub valid_until_ms: u64,
     pub epoch: Epoch,
 }
-// TODO: methods - extend, release, ..
 
 #[derive(Debug, Clone)]
 pub struct LeaderElectionConfig {
@@ -187,6 +186,24 @@ impl LeaderElection {
                 Ok(TryBecomeLeaderResult::NotLeader)
             }
         }
+    }
+
+    /// Release leadership by marking the lock file as expired. Other nodes will
+    /// see the expired flag and can immediately start a new election instead of
+    /// waiting for `valid_until_ms` to pass. It is not safe to call abdicate if
+    /// you do not think you are the leader.
+    #[tracing::instrument(skip_all, fields(node_id = self.node_id, epoch = epoch.0), err)]
+    pub async fn abdicate(&self, epoch: Epoch) -> Result<()> {
+        let key = epoch.to_key(&self.prefix);
+        let body = serde_json::to_string(&LockFile {
+            valid_until_ms: 0,
+            expired: true,
+            node_id: self.node_id,
+        })
+        .unwrap();
+        s3::put_object(&self.s3_client, &self.bucket, &key, body).await?;
+        tracing::info!("released leadership");
+        Ok(())
     }
 }
 
@@ -466,6 +483,52 @@ mod tests {
         assert!(
             matches!(result, TryBecomeLeaderResult::Leader(ref info) if info.epoch == Epoch(5)),
             "should create epoch 5 (one past the highest existing lock): {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_abdicate_expires_lock() {
+        require_localstack().await;
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let le1 = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            namespace: ns.clone(),
+            s3_config: config.clone(),
+            validity_millis: None,
+        })
+        .await;
+
+        let info = match le1.try_become_leader().await.unwrap() {
+            TryBecomeLeaderResult::Leader(info) => info,
+            other => panic!("expected Leader, got {other:?}"),
+        };
+
+        le1.abdicate(info.epoch).await.unwrap();
+
+        // Verify the on-disk lock file has expired=true
+        let key = info.epoch.to_key(&lock_prefix(&ns));
+        let reader = s3::get_object_reader(&client, &bucket, &key).await.unwrap();
+        let lock_file: LockFile = serde_json::from_reader(reader).unwrap();
+        assert!(lock_file.expired, "lock file should be marked expired");
+
+        // Another node should be able to take over immediately
+        let le2 = LeaderElection::new(LeaderElectionConfig {
+            node_id: 2,
+            namespace: ns,
+            s3_config: config,
+            validity_millis: None,
+        })
+        .await;
+
+        let result = le2.try_become_leader().await.unwrap();
+        assert!(
+            matches!(result, TryBecomeLeaderResult::Leader(ref i) if i.epoch == info.epoch.next()),
+            "node 2 should become leader at next epoch after release: {result:?}"
         );
     }
 
