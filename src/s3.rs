@@ -1,3 +1,4 @@
+use anyhow::Context;
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
 
@@ -49,7 +50,7 @@ pub async fn build_client(config: &S3Config) -> Client {
 }
 
 /// Ensure the bucket exists, creating it if necessary.
-pub async fn ensure_bucket(client: &Client, bucket: &str) -> crate::error::Result<()> {
+pub async fn ensure_bucket(client: &Client, bucket: &str) -> anyhow::Result<()> {
     match client.head_bucket().bucket(bucket).send().await {
         Ok(_) => Ok(()),
         Err(_) => {
@@ -58,10 +59,7 @@ pub async fn ensure_bucket(client: &Client, bucket: &str) -> crate::error::Resul
                 .bucket(bucket)
                 .send()
                 .await
-                .map_err(|e| crate::error::Error::Storage {
-                    message: format!("create bucket: {e}"),
-                    backtrace: std::backtrace::Backtrace::capture(),
-                })?;
+                .context("create bucket")?;
             Ok(())
         }
     }

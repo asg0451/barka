@@ -1,11 +1,11 @@
 // based on https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/
 
+use anyhow::{bail, Context, Result};
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
 use bytes::Buf;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, LeaderElectionError, Result};
 use crate::s3::{self, S3Config};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -97,12 +97,10 @@ impl LeaderElection {
             .prefix(LOCK_FILE_PREFIX)
             .send()
             .await
-            .map_err(|e| Self::map_s3_err(e))?;
+            .context("s3: list lock files")?;
 
         if lock_files.continuation_token.is_some() {
-            return Err(Error::from(LeaderElectionError::Fatal(
-                "too many lock files (paginated response)".into(),
-            )));
+            bail!("leader election: too many lock files (paginated response)");
         }
         let contents = lock_files.contents.unwrap_or_default();
 
@@ -120,13 +118,15 @@ impl LeaderElection {
                 .key(newest_lock_file.key().unwrap())
                 .send()
                 .await
-                .map_err(|e| Self::map_s3_err(e))?
+                .context("s3: get lock file")?
                 .body
                 .collect()
                 .await
-                .map_err(|e| Self::map_s3_err(e))?;
-            let newest_lock_file: LockFile = serde_json::from_reader(newest_lock_file.reader())
-                .map_err(|e| Error::from(LeaderElectionError::Serde(e)))?;
+                .context("s3: read lock file body")?;
+            let newest_lock_file: LockFile =
+                serde_json::from_reader(newest_lock_file.reader())
+                    .context("deserialize lock file")?;
+            // TODO: check if valid_until_ms is in the past too
             if !newest_lock_file.expired {
                 tracing::debug!(
                     leader_node_id = newest_lock_file.node_id,
@@ -169,7 +169,7 @@ impl LeaderElection {
                 return Ok(TryBecomeLeaderResult::NotLeader);
             }
             Err(e) => {
-                return Err(Self::map_s3_err(e));
+                return Err(anyhow::anyhow!(e).context("s3: put lock file"));
             }
             Ok(_) => {
                 tracing::info!(epoch = epoch.0, "became leader");
@@ -180,11 +180,65 @@ impl LeaderElection {
             }
         }
     }
+}
 
-    fn map_s3_err<E: std::error::Error + Send + Sync + 'static>(e: E) -> Error {
-        Error::LeaderElection {
-            source: LeaderElectionError::S3(Box::new(e)),
-            backtrace: std::backtrace::Backtrace::capture(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::s3::{self, S3Config};
+
+    fn localstack_config(bucket: &str) -> S3Config {
+        S3Config {
+            endpoint_url: Some("http://localhost:4566".into()),
+            bucket: bucket.into(),
+            region: "us-east-1".into(),
         }
+    }
+
+    fn unique_name(prefix: &str) -> String {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{prefix}-{ts}")
+    }
+
+    #[tokio::test]
+    async fn test_become_leader_empty_bucket() {
+        let bucket = unique_name("test-leader");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let le = LeaderElection::new(1, "test-ns", config).await;
+        let result = le.try_become_leader().await.unwrap();
+
+        assert!(
+            matches!(result, TryBecomeLeaderResult::Leader(_)),
+            "first node should become leader on empty bucket"
+        );
+        if let TryBecomeLeaderResult::Leader(info) = result {
+            assert!(info.valid_until_ms > 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_second_node_not_leader() {
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let le1 = LeaderElection::new(1, &ns, config.clone()).await;
+        let result = le1.try_become_leader().await.unwrap();
+        assert!(matches!(result, TryBecomeLeaderResult::Leader(_)));
+
+        let le2 = LeaderElection::new(2, &ns, config).await;
+        let result = le2.try_become_leader().await.unwrap();
+        assert!(
+            matches!(result, TryBecomeLeaderResult::NotLeader),
+            "second node should not become leader"
+        );
     }
 }

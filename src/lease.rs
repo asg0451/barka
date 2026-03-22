@@ -1,4 +1,4 @@
-use crate::error::Result;
+use anyhow::Result;
 
 /// S3-based lease for partition leadership.
 /// Uses conditional writes with version tokens and heartbeats.

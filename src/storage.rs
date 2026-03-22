@@ -1,4 +1,4 @@
-use crate::error::Result;
+use anyhow::Result;
 
 /// Opaque storage backend. The implementation details (S3, segments, etc.)
 /// are left to the implementor.

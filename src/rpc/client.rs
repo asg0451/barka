@@ -13,7 +13,7 @@ pub struct BarkaClient {
 }
 
 impl BarkaClient {
-    pub async fn connect(addr: SocketAddr) -> crate::error::Result<Self> {
+    pub async fn connect(addr: SocketAddr) -> anyhow::Result<Self> {
         let stream = TcpStream::connect(addr).await?;
         let stream = stream.compat();
         let (reader, writer) = stream.split();
@@ -42,7 +42,7 @@ impl BarkaClient {
         topic: &str,
         partition: u32,
         values: Vec<Vec<u8>>,
-    ) -> crate::error::Result<u64> {
+    ) -> anyhow::Result<u64> {
         let mut req = self.client.produce_request();
         let mut builder = req.get().get_request()?;
         builder.set_topic(topic);
@@ -67,7 +67,7 @@ impl BarkaClient {
         partition: u32,
         offset: u64,
         max_records: u32,
-    ) -> crate::error::Result<Vec<crate::log::record::Record>> {
+    ) -> anyhow::Result<Vec<crate::log::record::Record>> {
         let mut req = self.client.consume_request();
         let mut builder = req.get().get_request()?;
         builder.set_topic(topic);

@@ -10,7 +10,7 @@ use tracing::{error, info};
 use crate::node::Node;
 use crate::rpc::barka_capnp::barka_svc;
 
-pub async fn serve_rpc(node: Node, addr: SocketAddr) -> crate::error::Result<()> {
+pub async fn serve_rpc(node: Node, addr: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "capnp-rpc listening");
 

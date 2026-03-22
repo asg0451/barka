@@ -66,7 +66,7 @@ impl Node {
         }
     }
 
-    pub async fn serve(&self) -> crate::error::Result<()> {
+    pub async fn serve(&self) -> anyhow::Result<()> {
         let rpc_addr = self.config.rpc_addr;
         let control_addr = self.config.control_addr;
 
@@ -101,7 +101,7 @@ impl Node {
 ///   Response: {"ok":true,"offset":0}
 ///             {"ok":true,"values":["hello"]}
 ///             {"ok":false,"error":"..."}
-async fn serve_control(node: Node, addr: SocketAddr) -> crate::error::Result<()> {
+async fn serve_control(node: Node, addr: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "control api listening");
 
