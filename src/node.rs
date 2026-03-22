@@ -37,21 +37,21 @@ pub struct Node {
 }
 
 impl Node {
-    pub async fn new(config: NodeConfig, s3_config: &S3Config) -> Self {
-        // TODO: this is a hack around not using up to date sequence numbers yet.
+    pub async fn new(config: NodeConfig, s3_config: &S3Config) -> anyhow::Result<Self> {
+        // TODO: this is a hack and we probably dont need it anymore. but its easier than clearing between runs.
         let prefix = format!(
-            "data/test/0/{}",
+            "{}/data/test/0",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         );
-        let producer = PartitionProducer::new(s3_config, prefix).await;
-        Self {
+        let producer = PartitionProducer::new(s3_config, prefix, 0).await?;
+        Ok(Self {
             config,
             partitions: Arc::new(Mutex::new(HashMap::new())),
             producer,
-        }
+        })
     }
 
     pub async fn serve(&self) -> anyhow::Result<()> {

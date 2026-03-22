@@ -79,6 +79,7 @@ impl barka_svc::Server for PerConnectionNode {
             .ok_or_else(|| capnp::Error::failed("missing message bytes".into()))?;
         let req = params.get()?.get_request()?;
 
+        // NOTE: only one producer atm. so only one topic & partition.
         // TODO: more than one producer, hook up leadership, etc
         self.node
             .producer
@@ -139,7 +140,8 @@ mod tests {
             },
             &s3_config,
         )
-        .await;
+        .await
+        .unwrap();
 
         let server_node = node.clone();
         let server = tokio::task::spawn_blocking(move || {
@@ -254,7 +256,8 @@ mod tests {
             },
             &s3_config,
         )
-        .await;
+        .await
+        .unwrap();
 
         let server_node = node.clone();
         let server = tokio::task::spawn_blocking(move || {
@@ -329,10 +332,7 @@ mod tests {
                                         format!("c{client_id}-{}", next_seq + i as u64).into_bytes()
                                     })
                                     .collect();
-                                let base = client
-                                    .produce(&topic, 0, batch)
-                                    .await
-                                    .unwrap();
+                                let base = client.produce(&topic, 0, batch).await.unwrap();
                                 assert_eq!(base, expected_base);
                                 next_seq += BATCH as u64;
                                 expected_base += BATCH as u64;
@@ -343,15 +343,12 @@ mod tests {
                                 "client {client_id} produced only {next_seq} records in {RUN_SECS}s"
                             );
 
-                            let records = client
-                                .consume(&topic, 0, 0, next_seq as u32)
-                                .await
-                                .unwrap();
+                            let records =
+                                client.consume(&topic, 0, 0, next_seq as u32).await.unwrap();
                             assert_eq!(records.len() as u64, next_seq);
                             for (i, r) in records.iter().enumerate() {
                                 assert_eq!(r.offset, i as u64);
-                                let want =
-                                    format!("c{client_id}-{}", i as u64).into_bytes();
+                                let want = format!("c{client_id}-{}", i as u64).into_bytes();
                                 assert_eq!(r.value, want);
                             }
                         })

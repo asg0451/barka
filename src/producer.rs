@@ -172,20 +172,54 @@ const DEFAULT_MAX_RECORDS: usize = 100;
 const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
 const DEFAULT_LINGER: Duration = Duration::from_millis(1000);
 
+/// Segment object keys are `{prefix}/{seq:020}.dat`.
+fn parse_segment_sequence_key(prefix: &str, key: &str) -> Option<u64> {
+    let p = format!("{prefix}/");
+    let suffix = key.strip_prefix(&p)?;
+    let num_part = suffix.strip_suffix(".dat")?;
+    if num_part.len() != 20 || !num_part.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    num_part.parse().ok()
+}
+
+/// List `prefix/` in S3 and return one past the highest segment sequence present (0 if none).
+async fn discover_next_segment_sequence(
+    client: &Client,
+    bucket: &str,
+    prefix: &str,
+) -> Result<u64> {
+    let list_prefix = format!("{prefix}/");
+    let objects = s3::list_objects(client, bucket, &list_prefix).await?;
+    let mut max_seq: Option<u64> = None;
+    for obj in objects {
+        let Some(key) = obj.key() else {
+            continue;
+        };
+        if let Some(seq) = parse_segment_sequence_key(prefix, key) {
+            max_seq = Some(max_seq.map_or(seq, |m| m.max(seq)));
+        }
+    }
+    Ok(max_seq.map_or(0, |m| m.saturating_add(1)))
+}
+
 pub struct PartitionProducer {
     s3_client: Client,
     bucket: String,
     prefix: String,
+    /// Writer epoch stored in every segment header (leader / split-brain protocol).
+    epoch: u64,
     next_sequence: AtomicU64,
     inner: Mutex<ProducerInner>,
     linger: Duration,
 }
 
 impl PartitionProducer {
-    pub async fn new(s3_config: &S3Config, prefix: String) -> Arc<Self> {
+    pub async fn new(s3_config: &S3Config, prefix: String, epoch: u64) -> Result<Arc<Self>> {
         Self::with_opts(
             s3_config,
             prefix,
+            epoch,
             DEFAULT_MAX_RECORDS,
             DEFAULT_MAX_BYTES,
             DEFAULT_LINGER,
@@ -196,21 +230,26 @@ impl PartitionProducer {
     pub async fn with_opts(
         s3_config: &S3Config,
         prefix: String,
+        epoch: u64,
         max_records: usize,
         max_bytes: usize,
         linger: Duration,
-    ) -> Arc<Self> {
+    ) -> Result<Arc<Self>> {
         let s3_client = crate::s3::build_client(s3_config).await;
+        let bucket = s3_config.bucket.clone();
+        let next_sequence =
+            discover_next_segment_sequence(&s3_client, &bucket, &prefix).await?;
         let producer = Arc::new(Self {
-            bucket: s3_config.bucket.clone(),
+            bucket,
             s3_client,
             prefix,
-            next_sequence: AtomicU64::new(0), // TODO: get from S3. add epoch too
+            epoch,
+            next_sequence: AtomicU64::new(next_sequence),
             inner: Mutex::new(ProducerInner::new(max_records, max_bytes)),
             linger,
         });
         producer.spawn_flush_timer();
-        producer
+        Ok(producer)
     }
 
     fn spawn_flush_timer(self: &Arc<Self>) {
@@ -234,7 +273,7 @@ impl PartitionProducer {
         let key = format!("{}/{:020}.dat", self.prefix, seq);
         Arc::new(FlushRound::new(
             participants,
-            0, // epoch TBD
+            self.epoch,
             self.bucket.clone(),
             key,
         ))
@@ -366,6 +405,14 @@ mod tests {
     }
 
     async fn test_producer(max_records: usize, max_bytes: usize) -> PartitionProducer {
+        test_producer_with_epoch(max_records, max_bytes, 0).await
+    }
+
+    async fn test_producer_with_epoch(
+        max_records: usize,
+        max_bytes: usize,
+        epoch: u64,
+    ) -> PartitionProducer {
         let config = S3Config {
             endpoint_url: Some("http://localhost:4566".to_string()),
             bucket: "test-producer".into(),
@@ -373,18 +420,24 @@ mod tests {
         };
         let s3_client = crate::s3::build_client(&config).await;
         s3::ensure_bucket(&s3_client, &config.bucket).await.unwrap();
+        let prefix = format!(
+            "test/{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
+        );
+        let next_sequence =
+            discover_next_segment_sequence(&s3_client, &config.bucket, &prefix)
+                .await
+                .unwrap();
         PartitionProducer {
             s3_client,
             bucket: config.bucket,
-            prefix: format!(
-                "test/{}-{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos(),
-                TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
-            ),
-            next_sequence: AtomicU64::new(0),
+            prefix,
+            epoch,
+            next_sequence: AtomicU64::new(next_sequence),
             inner: Mutex::new(ProducerInner::new(max_records, max_bytes)),
             linger: DEFAULT_LINGER,
         }
@@ -411,12 +464,44 @@ mod tests {
             .await
             .unwrap();
 
-        let key = format!("{}/{:020}", producer.prefix, 0);
+        let key = format!("{}/{:020}.dat", producer.prefix, 0);
         let (epoch, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
             .await
             .unwrap();
-        assert_eq!(epoch, 0);
+        assert_eq!(epoch, producer.epoch);
         assert_eq!(records.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn segment_epoch_on_producer_is_written() {
+        // max_records = 1 so a single-record request fills the batch (tests skip spawn_flush_timer).
+        let producer = test_producer_with_epoch(1, 1024 * 1024, 99).await;
+        let msg = TestMessage::new(1, 4);
+        producer
+            .apply_produce_request(msg.bytes().clone(), msg.request())
+            .await
+            .unwrap();
+        let key = format!("{}/{:020}.dat", producer.prefix, 0);
+        let (epoch, _) = read_segment(&producer.s3_client, &producer.bucket, &key)
+            .await
+            .unwrap();
+        assert_eq!(epoch, 99);
+    }
+
+    #[tokio::test]
+    async fn next_sequence_resumes_from_s3_listing() {
+        let producer_empty = test_producer(2, 1024 * 1024).await;
+        let prefix = producer_empty.prefix.clone();
+        let bucket = producer_empty.bucket.clone();
+        let client = producer_empty.s3_client.clone();
+        let key5 = format!("{}/{:020}.dat", prefix, 5u64);
+        s3::put_object(&client, &bucket, &key5, "x".into())
+            .await
+            .unwrap();
+        let next = discover_next_segment_sequence(&client, &bucket, &prefix)
+            .await
+            .unwrap();
+        assert_eq!(next, 6);
     }
 
     #[tokio::test]
@@ -428,7 +513,7 @@ mod tests {
             .await
             .unwrap();
 
-        let key = format!("{}/{:020}", producer.prefix, 0);
+        let key = format!("{}/{:020}.dat", producer.prefix, 0);
         let (_, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
             .await
             .unwrap();
@@ -446,7 +531,7 @@ mod tests {
         a.unwrap();
         b.unwrap();
 
-        let key = format!("{}/{:020}", producer.prefix, 0);
+        let key = format!("{}/{:020}.dat", producer.prefix, 0);
         let (_, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
             .await
             .unwrap();
@@ -467,7 +552,7 @@ mod tests {
         a.unwrap();
         b.unwrap();
 
-        let key = format!("{}/{:020}", producer.prefix, 0);
+        let key = format!("{}/{:020}.dat", producer.prefix, 0);
         let (_, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
             .await
             .unwrap();
@@ -490,8 +575,8 @@ mod tests {
             .await
             .unwrap();
 
-        let key0 = format!("{}/{:020}", producer.prefix, 0);
-        let key1 = format!("{}/{:020}", producer.prefix, 1);
+        let key0 = format!("{}/{:020}.dat", producer.prefix, 0);
+        let key1 = format!("{}/{:020}.dat", producer.prefix, 1);
         let (_, r0) = read_segment(&producer.s3_client, &producer.bucket, &key0)
             .await
             .unwrap();
