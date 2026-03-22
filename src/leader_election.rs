@@ -34,7 +34,7 @@ impl Epoch {
         Ok(Self(epoch))
     }
     fn to_key(self, prefix: &str) -> String {
-        format!("{}/{}.lock", prefix.trim_end_matches("/"), self.0)
+        format!("{}/{:010}.lock", prefix.trim_end_matches("/"), self.0)
     }
     fn next(self) -> Self {
         Self(self.0 + 1)
@@ -514,7 +514,10 @@ mod tests {
             let remaining = s3::list_objects(&client, &bucket, &prefix).await.unwrap();
             if remaining.len() == 1 {
                 let key = remaining[0].key().unwrap();
-                assert!(key.contains("/4.lock"), "only the new epoch should remain: {key}");
+                assert!(
+                    key.contains("/0000000004.lock"),
+                    "only the new epoch should remain: {key}"
+                );
                 break;
             }
             assert!(
