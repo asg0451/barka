@@ -13,8 +13,15 @@ struct ProduceRequest {
   records   @2 :List(Record);
 }
 
+# Server-assigned fields only — no key/value echo (avoids copying payload into
+# the response message; clients merge with their produce request).
+struct ProducedRecordMeta {
+  offset    @0 :UInt64;
+  timestamp @1 :Int64;
+}
+
 struct ProduceResponse {
-  baseOffset @0 :UInt64;
+  records @0 :List(ProducedRecordMeta);
 }
 
 struct ConsumeRequest {

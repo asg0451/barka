@@ -52,6 +52,10 @@
       (:offset resp)
       (throw (ex-info "produce failed" resp)))))
 
+;; TODO: consume offset is now a composite (segment_seq << 32 | intra_index).
+;; Once an S3-backed consumer exists, either the server should accept a
+;; sequential "cursor" and translate internally, or this client needs to
+;; understand composite offsets for seeking across segment boundaries.
 (defn consume!
   "Sends a consume request. Returns vector of string values."
   [conn topic partition offset max-records]

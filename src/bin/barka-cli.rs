@@ -85,11 +85,26 @@ fn main() -> Result<()> {
 
                 if cli.produce {
                     let values = collect_produce_values(&cli)?;
-                    let base = client
+                    let records = client
                         .produce(&cli.topic, cli.partition, values)
                         .await
                         .context("produce RPC")?;
-                    println!("{base}");
+                    if cli.json {
+                        for rec in &records {
+                            println!(
+                                "{}",
+                                serde_json::to_string(rec).context("serialize record")?
+                            );
+                        }
+                    } else {
+                        for rec in &records {
+                            let value = String::from_utf8_lossy(&rec.value);
+                            println!(
+                                "offset={} timestamp={} value={value}",
+                                rec.offset, rec.timestamp
+                            );
+                        }
+                    }
                     return Ok(());
                 }
 

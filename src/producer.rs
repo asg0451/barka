@@ -28,7 +28,15 @@ use crate::{
 // TODO: in future we'll want to add a manifest file that tracks the latest
 // sequence number, but that's a whole other can of worms.
 //
-// TODO: handle offsets and timestamps in the records. offset could be the sequence number + record number inside it?
+// Offsets are composite: (segment_seq << 32) | intra_segment_index.
+// Decompose with offset >> 32 (segment) and offset & 0xFFFF_FFFF (intra).
+
+/// Per-record metadata assigned server-side during a produce flush.
+#[derive(Clone, Debug)]
+pub struct ProducedRecord {
+    pub offset: u64,
+    pub timestamp: i64,
+}
 
 struct ProducerInner {
     pending_records: usize,
@@ -66,18 +74,20 @@ struct FlushRound {
     remaining: AtomicUsize,
     done: watch::Sender<Option<Result<(), String>>>,
     epoch: u64,
+    segment_seq: u64,
     bucket: String,
     key: String,
 }
 
 impl FlushRound {
-    fn new(participants: usize, epoch: u64, bucket: String, key: String) -> Self {
+    fn new(participants: usize, epoch: u64, segment_seq: u64, bucket: String, key: String) -> Self {
         let (done, _) = watch::channel(None);
         Self {
             records: Mutex::new(Vec::new()),
             remaining: AtomicUsize::new(participants),
             done,
             epoch,
+            segment_seq,
             bucket,
             key,
         }
@@ -86,16 +96,25 @@ impl FlushRound {
     /// Extract zero-copy `Bytes` sub-slices for each record's key/value data
     /// and collect them into the shared record list.
     ///
-    /// Returns `true` if this was the last contributor (flush leader).
+    /// Returns `(is_flush_leader, produced_records)`. The intra-segment index
+    /// for each caller's records is derived from the vec length under the lock,
+    /// so it's always consistent with the actual record ordering in the segment.
+    /// Offsets on the `RecordData` are stamped later in [`do_flush`].
     #[tracing::instrument(skip(self, message_bytes, request), fields(key = %self.key))]
     fn contribute(
         &self,
         message_bytes: &Bytes,
         request: produce_request::Reader<'_>,
-    ) -> Result<bool> {
+    ) -> Result<(bool, Vec<ProducedRecord>)> {
         let records = request.get_records()?;
-        let mut batch = Vec::with_capacity(records.len() as usize);
+        let n = records.len() as usize;
 
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut batch = Vec::with_capacity(n);
         for rec in records.iter() {
             let key_slice: &[u8] = rec.get_key()?;
             let value_slice: &[u8] = rec.get_value()?;
@@ -112,29 +131,41 @@ impl FlushRound {
             };
 
             batch.push(RecordData {
-                offset: rec.get_offset(),
-                timestamp: rec.get_timestamp(),
+                offset: 0,
+                timestamp: now_ms,
                 key,
                 value,
             });
         }
 
-        {
+        let produced = {
             let mut all = self.records.lock().unwrap();
+            let intra_base = all.len() as u64;
             all.extend(batch);
-        }
+            (0..n)
+                .map(|i| ProducedRecord {
+                    offset: (self.segment_seq << 32) | (intra_base + i as u64),
+                    timestamp: now_ms,
+                })
+                .collect()
+        };
 
-        Ok(self.remaining.fetch_sub(1, Ordering::AcqRel) == 1)
+        let is_leader = self.remaining.fetch_sub(1, Ordering::AcqRel) == 1;
+        Ok((is_leader, produced))
     }
 
     /// Encode the collected records as a binary segment and upload to S3 via
     /// scatter-gather (zero additional copies).
     #[tracing::instrument(skip(self, s3_client), fields(key = %self.key, epoch = self.epoch))]
     async fn do_flush(&self, s3_client: &Client) -> Result<()> {
-        let records = {
+        let mut records = {
             let mut guard = self.records.lock().unwrap();
             std::mem::take(&mut *guard)
         };
+
+        for (i, rec) in records.iter_mut().enumerate() {
+            rec.offset = (self.segment_seq << 32) | i as u64;
+        }
 
         let (chunks, total_len) = segment::encode_gather(self.epoch, &records);
         tracing::debug!(
@@ -274,13 +305,16 @@ impl PartitionProducer {
         Arc::new(FlushRound::new(
             participants,
             self.epoch,
+            seq,
             self.bucket.clone(),
             key,
         ))
     }
 
     /// Add records from `request` to the current batch. Resolves once every
-    /// record has been durably flushed to S3.
+    /// record has been durably flushed to S3. Returns per-record metadata
+    /// (composite offset and server-assigned timestamp) for each record in the
+    /// request, in order.
     ///
     /// `message_bytes` is the raw `Bytes` buffer backing the capnp reader.
     /// Key/value data is extracted as zero-copy sub-slices via
@@ -290,10 +324,10 @@ impl PartitionProducer {
         &self,
         message_bytes: Bytes,
         request: produce_request::Reader<'_>,
-    ) -> Result<()> {
+    ) -> Result<Vec<ProducedRecord>> {
         let record_count = request.get_records()?.len() as usize;
         if record_count == 0 {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let byte_size = (request.total_size()?.word_count as usize) * 8;
 
@@ -321,16 +355,16 @@ impl PartitionProducer {
         };
 
         let done_rx = round.done.subscribe();
-        let is_leader = round.contribute(&message_bytes, request)?;
+        let (is_leader, produced) = round.contribute(&message_bytes, request)?;
 
         if is_leader {
             let result = round.do_flush(&self.s3_client).await;
             let _ = round
                 .done
                 .send(Some(result.as_ref().map(|_| ()).map_err(|e| e.to_string())));
-            result
+            result.map(|_| produced)
         } else {
-            await_flush_done(done_rx).await
+            await_flush_done(done_rx).await.map(|_| produced)
         }
     }
 
@@ -459,10 +493,14 @@ mod tests {
     async fn batch_full_flushes_immediately() {
         let producer = test_producer(3, 1024 * 1024).await;
         let msg = TestMessage::new(3, 10);
-        producer
+        let produced = producer
             .apply_produce_request(msg.bytes().clone(), msg.request())
             .await
             .unwrap();
+        assert_eq!(produced.len(), 3);
+        for (i, p) in produced.iter().enumerate() {
+            assert_eq!(p.offset, (0u64 << 32) | i as u64);
+        }
 
         let key = format!("{}/{:020}.dat", producer.prefix, 0);
         let (epoch, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
@@ -470,6 +508,9 @@ mod tests {
             .unwrap();
         assert_eq!(epoch, producer.epoch);
         assert_eq!(records.len(), 3);
+        for (i, rec) in records.iter().enumerate() {
+            assert_eq!(rec.offset, (0u64 << 32) | i as u64);
+        }
     }
 
     #[tokio::test]
@@ -508,16 +549,23 @@ mod tests {
     async fn oversized_request_flushes_immediately() {
         let producer = test_producer(3, 1024 * 1024).await;
         let msg = TestMessage::new(5, 10);
-        producer
+        let produced = producer
             .apply_produce_request(msg.bytes().clone(), msg.request())
             .await
             .unwrap();
+        assert_eq!(produced.len(), 5);
+        for (i, p) in produced.iter().enumerate() {
+            assert_eq!(p.offset, (0u64 << 32) | i as u64);
+        }
 
         let key = format!("{}/{:020}.dat", producer.prefix, 0);
         let (_, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
             .await
             .unwrap();
         assert_eq!(records.len(), 5);
+        for (i, rec) in records.iter().enumerate() {
+            assert_eq!(rec.offset, (0u64 << 32) | i as u64);
+        }
     }
 
     #[tokio::test]
@@ -528,14 +576,21 @@ mod tests {
             producer.apply_produce_request(msg.bytes().clone(), msg.request()),
             producer.flush(),
         );
-        a.unwrap();
+        let produced = a.unwrap();
         b.unwrap();
+        assert_eq!(produced.len(), 3);
+        for (i, p) in produced.iter().enumerate() {
+            assert_eq!(p.offset, (0u64 << 32) | i as u64);
+        }
 
         let key = format!("{}/{:020}.dat", producer.prefix, 0);
         let (_, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
             .await
             .unwrap();
         assert_eq!(records.len(), 3);
+        for (i, rec) in records.iter().enumerate() {
+            assert_eq!(rec.offset, (0u64 << 32) | i as u64);
+        }
     }
 
     #[tokio::test]
@@ -557,6 +612,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(records.len(), 4);
+        for (i, rec) in records.iter().enumerate() {
+            assert_eq!(rec.offset, (0u64 << 32) | i as u64);
+        }
     }
 
     #[tokio::test]
@@ -564,16 +622,22 @@ mod tests {
         let producer = test_producer(2, 1024 * 1024).await;
 
         let m1 = TestMessage::new(2, 10);
-        producer
+        let p0 = producer
             .apply_produce_request(m1.bytes().clone(), m1.request())
             .await
             .unwrap();
+        assert_eq!(p0.len(), 2);
+        assert_eq!(p0[0].offset, (0u64 << 32) | 0);
+        assert_eq!(p0[1].offset, (0u64 << 32) | 1);
 
         let m2 = TestMessage::new(2, 10);
-        producer
+        let p1 = producer
             .apply_produce_request(m2.bytes().clone(), m2.request())
             .await
             .unwrap();
+        assert_eq!(p1.len(), 2);
+        assert_eq!(p1[0].offset, (1u64 << 32) | 0);
+        assert_eq!(p1[1].offset, (1u64 << 32) | 1);
 
         let key0 = format!("{}/{:020}.dat", producer.prefix, 0);
         let key1 = format!("{}/{:020}.dat", producer.prefix, 1);
@@ -584,7 +648,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r0.len(), 2);
+        assert_eq!(r0[0].offset, (0u64 << 32) | 0);
+        assert_eq!(r0[1].offset, (0u64 << 32) | 1);
         assert_eq!(r1.len(), 2);
+        assert_eq!(r1[0].offset, (1u64 << 32) | 0);
+        assert_eq!(r1[1].offset, (1u64 << 32) | 1);
     }
 
     #[tokio::test]
@@ -595,5 +663,45 @@ mod tests {
             .apply_produce_request(msg.bytes().clone(), msg.request())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn timestamps_are_server_assigned() {
+        let producer = test_producer(2, 1024 * 1024).await;
+        let before_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let msg = TestMessage::new(2, 4);
+        let produced = producer
+            .apply_produce_request(msg.bytes().clone(), msg.request())
+            .await
+            .unwrap();
+
+        let after_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        for p in &produced {
+            assert!(
+                p.timestamp >= before_ms && p.timestamp <= after_ms,
+                "expected server timestamp in [{before_ms}, {after_ms}], got {}",
+                p.timestamp
+            );
+        }
+
+        let key = format!("{}/{:020}.dat", producer.prefix, 0);
+        let (_, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
+            .await
+            .unwrap();
+        for rec in &records {
+            assert!(
+                rec.timestamp >= before_ms && rec.timestamp <= after_ms,
+                "expected server timestamp in [{before_ms}, {after_ms}], got {}",
+                rec.timestamp
+            );
+        }
     }
 }

@@ -143,9 +143,9 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
             )
             .await
             {
-                Ok(Ok(offset)) => JsonlResponse {
+                Ok(Ok(records)) => JsonlResponse {
                     ok: true,
-                    offset: Some(offset),
+                    offset: records.first().map(|r| r.offset),
                     values: None,
                     error: None,
                 },

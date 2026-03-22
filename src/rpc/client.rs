@@ -42,23 +42,36 @@ impl BarkaClient {
         topic: &str,
         partition: u32,
         values: Vec<Vec<u8>>,
-    ) -> anyhow::Result<u64> {
+    ) -> anyhow::Result<Vec<crate::log::record::Record>> {
         let mut req = self.client.produce_request();
         let mut builder = req.get().get_request()?;
         builder.set_topic(topic);
         builder.set_partition(partition);
         let mut records = builder.init_records(values.len() as u32);
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
         for (i, val) in values.iter().enumerate() {
             let mut rec = records.reborrow().get(i as u32);
             rec.set_value(val);
-            rec.set_timestamp(ts);
         }
         let response = req.send().promise.await?;
-        Ok(response.get()?.get_response()?.get_base_offset())
+        let resp_records = response.get()?.get_response()?.get_records()?;
+        let n = resp_records.len() as usize;
+        if n != values.len() {
+            anyhow::bail!(
+                "produce response record count mismatch: got {n}, sent {}",
+                values.len()
+            );
+        }
+        let mut out = Vec::with_capacity(n);
+        for (i, value) in values.into_iter().enumerate() {
+            let m = resp_records.get(i as u32);
+            out.push(crate::log::record::Record {
+                key: None,
+                value,
+                offset: m.get_offset(),
+                timestamp: m.get_timestamp(),
+            });
+        }
+        Ok(out)
     }
 
     pub async fn consume(

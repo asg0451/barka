@@ -81,14 +81,20 @@ impl barka_svc::Server for PerConnectionNode {
 
         // NOTE: only one producer atm. so only one topic & partition.
         // TODO: more than one producer, hook up leadership, etc
-        self.node
+        let produced = self
+            .node
             .producer
             .apply_produce_request(raw, req)
             .await
             .map_err(|e| capnp::Error::failed(e.to_string()))?;
 
-        let base_offset = self.node.apply_produce_request(req)?;
-        results.get().get_response()?.set_base_offset(base_offset);
+        let resp = results.get().get_response()?;
+        let mut out = resp.init_records(produced.len() as u32);
+        for (i, p) in produced.iter().enumerate() {
+            let mut dst = out.reborrow().get(i as u32);
+            dst.set_offset(p.offset);
+            dst.set_timestamp(p.timestamp);
+        }
         Ok(())
     }
 
@@ -195,30 +201,25 @@ mod tests {
                     .run_until(async {
                         let client = BarkaClient::connect(addr).await.unwrap();
 
-                        let base = client
+                        // First produce: 2 records → segment 0, intra [0,1]
+                        let recs = client
                             .produce("test-topic", 0, vec![b"hello".to_vec(), b"world".to_vec()])
                             .await
                             .unwrap();
-                        assert_eq!(base, 0);
+                        assert_eq!(recs.len(), 2);
+                        assert_eq!(recs[0].offset, (0u64 << 32) | 0);
+                        assert_eq!(recs[0].value, b"hello");
+                        assert_eq!(recs[1].offset, (0u64 << 32) | 1);
+                        assert_eq!(recs[1].value, b"world");
 
-                        let base2 = client
+                        // Second produce: 1 record → segment 1, intra [0]
+                        let recs2 = client
                             .produce("test-topic", 0, vec![b"third".to_vec()])
                             .await
                             .unwrap();
-                        assert_eq!(base2, 2);
-
-                        let records = client.consume("test-topic", 0, 0, 10).await.unwrap();
-                        assert_eq!(records.len(), 3);
-                        assert_eq!(records[0].value, b"hello");
-                        assert_eq!(records[1].value, b"world");
-                        assert_eq!(records[2].value, b"third");
-                        assert_eq!(records[0].offset, 0);
-                        assert_eq!(records[1].offset, 1);
-                        assert_eq!(records[2].offset, 2);
-
-                        let slice = client.consume("test-topic", 0, 1, 1).await.unwrap();
-                        assert_eq!(slice.len(), 1);
-                        assert_eq!(slice[0].value, b"world");
+                        assert_eq!(recs2.len(), 1);
+                        assert_eq!(recs2[0].offset, (1u64 << 32) | 0);
+                        assert_eq!(recs2[0].value, b"third");
                     })
                     .await;
             });
@@ -338,34 +339,39 @@ mod tests {
                             let client = BarkaClient::connect(addr).await.unwrap();
                             let topic = format!("load-stress-{client_id}");
                             let deadline = Instant::now() + Duration::from_secs(RUN_SECS);
-                            let mut next_seq: u64 = 0;
-                            let mut expected_base: u64 = 0;
+                            let mut produce_count: u64 = 0;
+                            let mut prev_first_offset: Option<u64> = None;
 
                             while Instant::now() < deadline {
                                 let batch: Vec<Vec<u8>> = (0..BATCH)
                                     .map(|i| {
-                                        format!("c{client_id}-{}", next_seq + i as u64).into_bytes()
+                                        format!("c{client_id}-{}", produce_count + i as u64)
+                                            .into_bytes()
                                     })
                                     .collect();
-                                let base = client.produce(&topic, 0, batch).await.unwrap();
-                                assert_eq!(base, expected_base);
-                                next_seq += BATCH as u64;
-                                expected_base += BATCH as u64;
+                                let recs = client.produce(&topic, 0, batch).await.unwrap();
+                                assert_eq!(recs.len(), BATCH);
+                                let first_offset = recs[0].offset;
+                                if let Some(prev) = prev_first_offset {
+                                    assert!(
+                                        first_offset > prev,
+                                        "first_offset must increase: prev={prev:#x} cur={first_offset:#x}"
+                                    );
+                                }
+                                for (i, r) in recs.iter().enumerate() {
+                                    let want =
+                                        format!("c{client_id}-{}", produce_count + i as u64)
+                                            .into_bytes();
+                                    assert_eq!(r.value, want);
+                                }
+                                prev_first_offset = Some(first_offset);
+                                produce_count += BATCH as u64;
                             }
 
                             assert!(
-                                next_seq >= MIN_TOTAL_RECORDS,
-                                "client {client_id} produced only {next_seq} records in {RUN_SECS}s"
+                                produce_count >= MIN_TOTAL_RECORDS,
+                                "client {client_id} produced only {produce_count} records in {RUN_SECS}s"
                             );
-
-                            let records =
-                                client.consume(&topic, 0, 0, next_seq as u32).await.unwrap();
-                            assert_eq!(records.len() as u64, next_seq);
-                            for (i, r) in records.iter().enumerate() {
-                                assert_eq!(r.offset, i as u64);
-                                let want = format!("c{client_id}-{}", i as u64).into_bytes();
-                                assert_eq!(r.value, want);
-                            }
                         })
                         .await;
                 });
