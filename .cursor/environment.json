@@ -1,7 +1,7 @@
 {
   "user": "ubuntu",
   "build": {
-    "dockerfile": "Dockerfile",
+    "dockerfile": "Dockerfile.cursor-cloud-agent",
     "context": "."
   },
   "install": "cargo fetch && cargo build --tests",

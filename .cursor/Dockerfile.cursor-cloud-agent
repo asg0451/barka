@@ -1,4 +1,5 @@
-# Cloud agent image: Docker-in-VM (Cursor-recommended pattern) + Rust toolchain for barka.
+# NOT the barka release image — dev environment for Cursor Cloud Agents only.
+# Docker-in-VM (Cursor-recommended) + Rust nightly + LocalStack-oriented deps.
 # See https://cursor.com/docs/cloud-agent/setup#running-docker
 FROM ubuntu:24.04
 
