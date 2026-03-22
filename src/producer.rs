@@ -3,7 +3,9 @@ use aws_sdk_s3::Client;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{oneshot, watch};
+use tracing::warn;
 
 use crate::{
     rpc::barka_capnp::produce_request,
@@ -154,24 +156,59 @@ async fn await_flush_done(mut rx: watch::Receiver<Option<Result<(), String>>>) -
     }
 }
 
+const DEFAULT_MAX_RECORDS: usize = 100;
+const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
+const DEFAULT_LINGER: Duration = Duration::from_millis(100);
+
 pub struct PartitionProducer {
     s3_client: Client,
     bucket: String,
     prefix: String,
     next_sequence: AtomicU64,
     inner: Mutex<ProducerInner>,
+    linger: Duration,
 }
 
 impl PartitionProducer {
-    pub async fn new(s3_config: &S3Config, prefix: String) -> Self {
+    pub async fn new(s3_config: &S3Config, prefix: String) -> Arc<Self> {
+        Self::with_opts(s3_config, prefix, DEFAULT_MAX_RECORDS, DEFAULT_MAX_BYTES, DEFAULT_LINGER)
+            .await
+    }
+
+    pub async fn with_opts(
+        s3_config: &S3Config,
+        prefix: String,
+        max_records: usize,
+        max_bytes: usize,
+        linger: Duration,
+    ) -> Arc<Self> {
         let s3_client = crate::s3::build_client(s3_config).await;
-        Self {
+        let producer = Arc::new(Self {
             bucket: s3_config.bucket.clone(),
             s3_client,
             prefix,
             next_sequence: AtomicU64::new(0),
-            inner: Mutex::new(ProducerInner::new(100, 1024 * 1024)),
-        }
+            inner: Mutex::new(ProducerInner::new(max_records, max_bytes)),
+            linger,
+        });
+        producer.spawn_flush_timer();
+        producer
+    }
+
+    fn spawn_flush_timer(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let linger = self.linger;
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(linger).await;
+                let Some(producer) = weak.upgrade() else {
+                    break;
+                };
+                if let Err(e) = producer.flush().await {
+                    warn!(error = %e, "flush timer: flush failed");
+                }
+            }
+        });
     }
 
     fn create_flush_round(&self, participants: usize) -> Arc<FlushRound> {
@@ -264,6 +301,9 @@ impl PartitionProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
     /// Holds a `Bytes`-backed capnp message reader, keeping the parsed segments
     /// alive so we can borrow a `produce_request::Reader` from it.
@@ -318,14 +358,16 @@ mod tests {
             s3_client,
             bucket: config.bucket,
             prefix: format!(
-                "test/{}",
+                "test/{}-{}",
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
-                    .as_nanos()
+                    .as_nanos(),
+                TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
             ),
             next_sequence: AtomicU64::new(0),
             inner: Mutex::new(ProducerInner::new(max_records, max_bytes)),
+            linger: DEFAULT_LINGER,
         }
     }
 

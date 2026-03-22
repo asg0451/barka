@@ -4,8 +4,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::jepsen_gateway;
 use crate::log::partition::Partition;
+use crate::producer::PartitionProducer;
 use crate::rpc::barka_capnp::{consume_request, consume_response, produce_request};
 use crate::rpc::server::serve_rpc;
+use crate::s3::S3Config;
 
 /// (topic, partition_id)
 pub type TopicPartition = (String, u32);
@@ -53,13 +55,23 @@ impl NodeConfig {
 pub struct Node {
     pub config: NodeConfig,
     pub partitions: Arc<Mutex<HashMap<TopicPartition, Partition>>>,
+    pub producer: Arc<PartitionProducer>,
 }
 
 impl Node {
-    pub fn new(config: NodeConfig) -> Self {
+    pub async fn new(config: NodeConfig, s3_config: &S3Config) -> Self {
+        let prefix = format!(
+            "data/test/0/{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let producer = PartitionProducer::new(s3_config, prefix).await;
         Self {
             config,
             partitions: Arc::new(Mutex::new(HashMap::new())),
+            producer,
         }
     }
 

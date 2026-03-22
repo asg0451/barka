@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
     let s3_client = s3::build_client(&s3_config).await;
     s3::ensure_bucket(&s3_client, &s3_config.bucket).await?;
 
-    let node = Node::new(config);
+    let node = Node::new(config, &s3_config).await;
     node.serve().await?;
     Ok(())
 }

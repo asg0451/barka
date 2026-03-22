@@ -72,10 +72,21 @@ impl barka_svc::Server for PerConnectionNode {
         params: barka_svc::ProduceParams,
         mut results: barka_svc::ProduceResults,
     ) -> Result<(), capnp::Error> {
-        let _raw = self.msg_bytes.borrow_mut().pop_front();
+        let raw = self
+            .msg_bytes
+            .borrow_mut()
+            .pop_front()
+            .ok_or_else(|| capnp::Error::failed("missing message bytes".into()))?;
         let req = params.get()?.get_request()?;
-        let base_offset = self.node.apply_produce_request(req)?;
 
+        // TODO: more than one producer, hook up leadership, etc
+        self.node
+            .producer
+            .apply_produce_request(raw, req)
+            .await
+            .map_err(|e| capnp::Error::failed(e.to_string()))?;
+
+        let base_offset = self.node.apply_produce_request(req)?;
         results.get().get_response()?.set_base_offset(base_offset);
         Ok(())
     }
@@ -98,16 +109,31 @@ mod tests {
     use super::*;
     use crate::node::{Node, NodeConfig};
     use crate::rpc::client::BarkaClient;
+    use crate::s3::S3Config;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rpc_produce_consume_round_trip() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let node = Node::new(NodeConfig {
-            rpc_addr: addr,
-            ..Default::default()
-        });
+        let s3_config = S3Config {
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            bucket: "test-rpc".into(),
+            region: "us-east-1".into(),
+        };
+        let s3_client = crate::s3::build_client(&s3_config).await;
+        crate::s3::ensure_bucket(&s3_client, &s3_config.bucket)
+            .await
+            .unwrap();
+
+        let node = Node::new(
+            NodeConfig {
+                rpc_addr: addr,
+                ..Default::default()
+            },
+            &s3_config,
+        )
+        .await;
 
         let server_node = node.clone();
         let server = tokio::task::spawn_blocking(move || {
