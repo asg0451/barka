@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes};
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
 use aws_sdk_s3::Client;
@@ -189,6 +190,42 @@ pub async fn list_objects(
     Ok(resp.contents.unwrap_or_default())
 }
 
+fn get_object_err_is_no_such_key(err: &SdkError<GetObjectError>) -> bool {
+    err.as_service_error().is_some_and(|e| {
+        e.is_no_such_key() || e.code() == Some("NoSuchKey")
+    })
+}
+
+/// Fetch an object's body as a reader. The response is buffered in memory
+/// but not flattened into a single contiguous allocation.
+///
+/// Returns [`Ok(None)`] if the key does not exist (**NoSuchKey**), e.g. when
+/// another client deleted the object after a list.
+#[tracing::instrument(skip(client), err)]
+pub async fn get_object_reader_if_present(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<Option<impl std::io::Read>> {
+    let output = match client
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) if get_object_err_is_no_such_key(&e) => return Ok(None),
+        Err(e) => return Err(anyhow::Error::from(e).context("s3: get object")),
+    };
+    let body = output
+        .body
+        .collect()
+        .await
+        .context("s3: read object body")?;
+    Ok(Some(body.reader()))
+}
+
 /// Fetch an object's body as a reader. The response is buffered in memory
 /// but not flattened into a single contiguous allocation.
 #[tracing::instrument(skip(client), err)]
@@ -197,18 +234,10 @@ pub async fn get_object_reader(
     bucket: &str,
     key: &str,
 ) -> Result<impl std::io::Read> {
-    let body = client
-        .get_object()
-        .bucket(bucket)
-        .key(key)
-        .send()
-        .await
-        .context("s3: get object")?
-        .body
-        .collect()
-        .await
-        .context("s3: read object body")?;
-    Ok(body.reader())
+    match get_object_reader_if_present(client, bucket, key).await? {
+        Some(r) => Ok(r),
+        None => bail!("s3: get object: key does not exist"),
+    }
 }
 
 /// Unconditional put: writes `body` to `key`, overwriting any existing object.

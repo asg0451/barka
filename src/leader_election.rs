@@ -71,6 +71,8 @@ pub struct LeaderElection {
 
 const LOCK_FILE_PREFIX: &str = "lock/";
 const VALIDITY_MILLIS: u64 = 10_000;
+/// Restart from `list_objects` when a listed lock key is deleted before `get_object` (e.g. winner cleanup).
+const TRY_BECOME_LEADER_MAX_LIST_GET_RACES: u32 = 64;
 
 impl LeaderElection {
     pub async fn new(config: LeaderElectionConfig) -> Self {
@@ -105,87 +107,101 @@ impl LeaderElection {
     // also we probably want a background process deleting old lock files..
     #[tracing::instrument(skip_all, fields(node_id = self.node_id, prefix = self.prefix, bucket = self.bucket), err, ret)]
     pub async fn try_become_leader(&self) -> Result<TryBecomeLeaderResult> {
-        let contents = s3::list_objects(&self.s3_client, &self.bucket, &self.prefix).await?;
+        for _ in 0..TRY_BECOME_LEADER_MAX_LIST_GET_RACES {
+            let contents = s3::list_objects(&self.s3_client, &self.bucket, &self.prefix).await?;
 
-        let mut last_epoch = None;
-        if !contents.is_empty() {
-            let newest = contents.last().unwrap();
-            let key = newest.key().unwrap();
-            last_epoch = Some(Epoch::from_key(key)?);
-            let reader = s3::get_object_reader(&self.s3_client, &self.bucket, key).await?;
-            let lock_file: LockFile =
-                serde_json::from_reader(reader).context("deserialize lock file")?;
-            // TODO: check if valid_until_ms is in the past too
+            let mut last_epoch = None;
+            if !contents.is_empty() {
+                let newest = contents.last().unwrap();
+                let key = newest.key().unwrap();
+                last_epoch = Some(Epoch::from_key(key)?);
+                let reader = match s3::get_object_reader_if_present(&self.s3_client, &self.bucket, key)
+                    .await?
+                {
+                    Some(r) => r,
+                    None => {
+                        tracing::debug!("lock file removed between list and get, retrying");
+                        continue;
+                    }
+                };
+                let lock_file: LockFile =
+                    serde_json::from_reader(reader).context("deserialize lock file")?;
+                // TODO: check if valid_until_ms is in the past too
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
+                if !lock_file.expired && lock_file.valid_until_ms > now_ms {
+                    if lock_file.node_id == self.node_id {
+                        tracing::debug!(
+                            valid_until_ms = lock_file.valid_until_ms,
+                            now_ms,
+                            "still leader"
+                        );
+                        return Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
+                            valid_until_ms: lock_file.valid_until_ms,
+                            epoch: last_epoch.unwrap(),
+                        }));
+                    }
+                    tracing::debug!(
+                        leader_node_id = lock_file.node_id,
+                        valid_until_ms = lock_file.valid_until_ms,
+                        now_ms,
+                        "not becoming leader: lock file not expired"
+                    );
+                    return Ok(TryBecomeLeaderResult::NotLeader);
+                }
+            }
+
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
-            if !lock_file.expired && lock_file.valid_until_ms > now_ms {
-                if lock_file.node_id == self.node_id {
-                    tracing::debug!(
-                        valid_until_ms = lock_file.valid_until_ms,
-                        now_ms,
-                        "still leader"
-                    );
-                    return Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
-                        valid_until_ms: lock_file.valid_until_ms,
-                        epoch: last_epoch.unwrap(),
-                    }));
+            let valid_until_ms = now_ms + VALIDITY_MILLIS;
+
+            let lock_file_body = serde_json::to_string(&LockFile {
+                valid_until_ms,
+                expired: false,
+                node_id: self.node_id,
+            })
+            .unwrap();
+
+            let epoch = last_epoch.unwrap_or(Epoch(0)).next();
+            let key = epoch.to_key(&self.prefix);
+
+            let old_keys: Vec<String> = contents
+                .iter()
+                .filter_map(|obj| obj.key().map(str::to_owned))
+                .collect();
+
+            return match s3::put_if_absent(&self.s3_client, &self.bucket, &key, lock_file_body.into())
+                .await?
+            {
+                PutOutcome::Created => {
+                    tracing::info!(epoch = epoch.0, "became leader");
+                    // clean up old lock files
+                    if !old_keys.is_empty() {
+                        let client = self.s3_client.clone();
+                        let bucket = self.bucket.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = s3::delete_objects(&client, &bucket, old_keys).await {
+                                tracing::warn!(error = %e, "failed to clean up old lock files");
+                            }
+                        });
+                    }
+                    Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
+                        valid_until_ms,
+                        epoch,
+                    }))
                 }
-                tracing::debug!(
-                    leader_node_id = lock_file.node_id,
-                    valid_until_ms = lock_file.valid_until_ms,
-                    now_ms,
-                    "not becoming leader: lock file not expired"
-                );
-                return Ok(TryBecomeLeaderResult::NotLeader);
-            }
+                PutOutcome::AlreadyExists => {
+                    tracing::debug!("lock file already exists, not becoming leader");
+                    Ok(TryBecomeLeaderResult::NotLeader)
+                }
+            };
         }
 
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        let valid_until_ms = now_ms + VALIDITY_MILLIS;
-
-        let lock_file_body = serde_json::to_string(&LockFile {
-            valid_until_ms,
-            expired: false,
-            node_id: self.node_id,
-        })
-        .unwrap();
-
-        let epoch = last_epoch.unwrap_or(Epoch(0)).next();
-        let key = epoch.to_key(&self.prefix);
-
-        let old_keys: Vec<String> = contents
-            .iter()
-            .filter_map(|obj| obj.key().map(str::to_owned))
-            .collect();
-
-        match s3::put_if_absent(&self.s3_client, &self.bucket, &key, lock_file_body.into()).await? {
-            PutOutcome::Created => {
-                tracing::info!(epoch = epoch.0, "became leader");
-                // clean up old lock files
-                if !old_keys.is_empty() {
-                    let client = self.s3_client.clone();
-                    let bucket = self.bucket.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = s3::delete_objects(&client, &bucket, old_keys).await {
-                            tracing::warn!(error = %e, "failed to clean up old lock files");
-                        }
-                    });
-                }
-                Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
-                    valid_until_ms,
-                    epoch,
-                }))
-            }
-            PutOutcome::AlreadyExists => {
-                tracing::debug!("lock file already exists, not becoming leader");
-                Ok(TryBecomeLeaderResult::NotLeader)
-            }
-        }
+        anyhow::bail!("leader election: exhausted retries after concurrent lock cleanup");
     }
 
     /// Release leadership by marking the lock file as expired. Other nodes will
