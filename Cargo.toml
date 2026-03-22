@@ -2,8 +2,10 @@
 name = "barka"
 version = "0.1.0"
 edition = "2024"
+default-run = "barka"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 capnp = { version = "0.25", features = ["unaligned"] }
 capnp-futures = "0.25"
 capnp-rpc = "0.25"
