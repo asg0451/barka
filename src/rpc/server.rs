@@ -118,6 +118,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::log_offset::compose;
     use crate::node::{Node, NodeConfig};
     use crate::rpc::client::BarkaClient;
     use crate::s3::S3Config;
@@ -207,9 +208,9 @@ mod tests {
                             .await
                             .unwrap();
                         assert_eq!(recs.len(), 2);
-                        assert_eq!(recs[0].offset, (0u64 << 32) | 0);
+                        assert_eq!(recs[0].offset, compose(0, 0));
                         assert_eq!(recs[0].value, b"hello");
-                        assert_eq!(recs[1].offset, (0u64 << 32) | 1);
+                        assert_eq!(recs[1].offset, compose(0, 1));
                         assert_eq!(recs[1].value, b"world");
 
                         // Second produce: 1 record → segment 1, intra [0]
@@ -218,7 +219,7 @@ mod tests {
                             .await
                             .unwrap();
                         assert_eq!(recs2.len(), 1);
-                        assert_eq!(recs2[0].offset, (1u64 << 32) | 0);
+                        assert_eq!(recs2[0].offset, compose(1, 0));
                         assert_eq!(recs2[0].value, b"third");
                     })
                     .await;

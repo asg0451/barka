@@ -76,8 +76,9 @@
           ;; TODO: consume is broken — needs S3-backed reader.
           ;; The in-memory scaffold is no longer populated by the produce path.
           ;; Once an S3 consumer exists, this also needs to handle composite
-          ;; offsets: (segment_seq << 32) | intra_index. Incrementing by 1
-          ;; works within a segment but not across segment boundaries.
+          ;; offsets: 40-bit segment_seq in the high bits, 24-bit intra in the low
+          ;; (see barka `log_offset` module). Incrementing by 1 only works within
+          ;; a segment, not across segment boundaries.
           :consume
           (let [off    @consume-offset
                 values (barka/consume! conn "default" 0 off 1)]

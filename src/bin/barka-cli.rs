@@ -2,6 +2,7 @@ use std::io::{self, BufRead, IsTerminal};
 use std::net::SocketAddr;
 
 use anyhow::{bail, Context, Result};
+use barka::log_offset::format_decomposed;
 use barka::rpc::client::BarkaClient;
 use clap::Parser;
 
@@ -100,8 +101,9 @@ fn main() -> Result<()> {
                         for rec in &records {
                             let value = String::from_utf8_lossy(&rec.value);
                             println!(
-                                "offset={} timestamp={} value={value}",
-                                rec.offset, rec.timestamp
+                                "{} timestamp={} value={value}",
+                                format_decomposed(rec.offset),
+                                rec.timestamp
                             );
                         }
                     }
@@ -124,8 +126,9 @@ fn main() -> Result<()> {
                     for rec in records {
                         let value = String::from_utf8_lossy(&rec.value);
                         println!(
-                            "offset={} timestamp={} value={value}",
-                            rec.offset, rec.timestamp
+                            "{} timestamp={} value={value}",
+                            format_decomposed(rec.offset),
+                            rec.timestamp
                         );
                     }
                 }

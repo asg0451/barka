@@ -8,6 +8,7 @@ use tokio::sync::{oneshot, watch};
 use tracing::warn;
 
 use crate::{
+    log_offset::{self, compose},
     rpc::barka_capnp::produce_request,
     s3::{self, S3Config},
     segment::{self, RecordData},
@@ -28,8 +29,7 @@ use crate::{
 // TODO: in future we'll want to add a manifest file that tracks the latest
 // sequence number, but that's a whole other can of worms.
 //
-// Offsets are composite: (segment_seq << 32) | intra_segment_index.
-// Decompose with offset >> 32 (segment) and offset & 0xFFFF_FFFF (intra).
+// Offsets are composite — see [`crate::log_offset`] (40-bit segment + 24-bit intra).
 
 /// Per-record metadata assigned server-side during a produce flush.
 #[derive(Clone, Debug)]
@@ -141,10 +141,20 @@ impl FlushRound {
         let produced = {
             let mut all = self.records.lock().unwrap();
             let intra_base = all.len() as u64;
+            let last_intra = intra_base
+                .checked_add(n as u64)
+                .and_then(|x| x.checked_sub(1))
+                .unwrap_or(intra_base);
+            if last_intra > log_offset::INTRA_MASK {
+                anyhow::bail!(
+                    "segment would exceed intra field (max {} records per segment)",
+                    log_offset::INTRA_MASK + 1
+                );
+            }
             all.extend(batch);
             (0..n)
                 .map(|i| ProducedRecord {
-                    offset: (self.segment_seq << 32) | (intra_base + i as u64),
+                    offset: compose(self.segment_seq, intra_base + i as u64),
                     timestamp: now_ms,
                 })
                 .collect()
@@ -164,7 +174,7 @@ impl FlushRound {
         };
 
         for (i, rec) in records.iter_mut().enumerate() {
-            rec.offset = (self.segment_seq << 32) | i as u64;
+            rec.offset = compose(self.segment_seq, i as u64);
         }
 
         let (chunks, total_len) = segment::encode_gather(self.epoch, &records);
@@ -299,16 +309,22 @@ impl PartitionProducer {
         });
     }
 
-    fn create_flush_round(&self, participants: usize) -> Arc<FlushRound> {
+    fn create_flush_round(&self, participants: usize) -> Result<Arc<FlushRound>> {
         let seq = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        if seq > log_offset::MAX_SEGMENT_SEQ {
+            anyhow::bail!(
+                "segment sequence overflow (max {})",
+                log_offset::MAX_SEGMENT_SEQ
+            );
+        }
         let key = format!("{}/{:020}.dat", self.prefix, seq);
-        Arc::new(FlushRound::new(
+        Ok(Arc::new(FlushRound::new(
             participants,
             self.epoch,
             seq,
             self.bucket.clone(),
             key,
-        ))
+        )))
     }
 
     /// Add records from `request` to the current batch. Resolves once every
@@ -338,7 +354,7 @@ impl PartitionProducer {
 
             if inner.is_full() {
                 let participants = inner.waiters.len() + 1;
-                let round = self.create_flush_round(participants);
+                let round = self.create_flush_round(participants)?;
                 for tx in inner.waiters.drain(..) {
                     let _ = tx.send(Arc::clone(&round));
                 }
@@ -376,7 +392,7 @@ impl PartitionProducer {
                 return Ok(());
             }
             let participants = inner.waiters.len();
-            let round = self.create_flush_round(participants);
+            let round = self.create_flush_round(participants)?;
             let done_rx = round.done.subscribe();
             for tx in inner.waiters.drain(..) {
                 let _ = tx.send(Arc::clone(&round));
@@ -393,6 +409,7 @@ impl PartitionProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::log_offset::compose;
     use std::sync::atomic::AtomicU32;
 
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -499,7 +516,7 @@ mod tests {
             .unwrap();
         assert_eq!(produced.len(), 3);
         for (i, p) in produced.iter().enumerate() {
-            assert_eq!(p.offset, (0u64 << 32) | i as u64);
+            assert_eq!(p.offset, compose(0, i as u64));
         }
 
         let key = format!("{}/{:020}.dat", producer.prefix, 0);
@@ -509,7 +526,7 @@ mod tests {
         assert_eq!(epoch, producer.epoch);
         assert_eq!(records.len(), 3);
         for (i, rec) in records.iter().enumerate() {
-            assert_eq!(rec.offset, (0u64 << 32) | i as u64);
+            assert_eq!(rec.offset, compose(0, i as u64));
         }
     }
 
@@ -555,7 +572,7 @@ mod tests {
             .unwrap();
         assert_eq!(produced.len(), 5);
         for (i, p) in produced.iter().enumerate() {
-            assert_eq!(p.offset, (0u64 << 32) | i as u64);
+            assert_eq!(p.offset, compose(0, i as u64));
         }
 
         let key = format!("{}/{:020}.dat", producer.prefix, 0);
@@ -564,7 +581,7 @@ mod tests {
             .unwrap();
         assert_eq!(records.len(), 5);
         for (i, rec) in records.iter().enumerate() {
-            assert_eq!(rec.offset, (0u64 << 32) | i as u64);
+            assert_eq!(rec.offset, compose(0, i as u64));
         }
     }
 
@@ -580,7 +597,7 @@ mod tests {
         b.unwrap();
         assert_eq!(produced.len(), 3);
         for (i, p) in produced.iter().enumerate() {
-            assert_eq!(p.offset, (0u64 << 32) | i as u64);
+            assert_eq!(p.offset, compose(0, i as u64));
         }
 
         let key = format!("{}/{:020}.dat", producer.prefix, 0);
@@ -589,7 +606,7 @@ mod tests {
             .unwrap();
         assert_eq!(records.len(), 3);
         for (i, rec) in records.iter().enumerate() {
-            assert_eq!(rec.offset, (0u64 << 32) | i as u64);
+            assert_eq!(rec.offset, compose(0, i as u64));
         }
     }
 
@@ -613,7 +630,7 @@ mod tests {
             .unwrap();
         assert_eq!(records.len(), 4);
         for (i, rec) in records.iter().enumerate() {
-            assert_eq!(rec.offset, (0u64 << 32) | i as u64);
+            assert_eq!(rec.offset, compose(0, i as u64));
         }
     }
 
@@ -627,8 +644,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(p0.len(), 2);
-        assert_eq!(p0[0].offset, (0u64 << 32) | 0);
-        assert_eq!(p0[1].offset, (0u64 << 32) | 1);
+        assert_eq!(p0[0].offset, compose(0, 0));
+        assert_eq!(p0[1].offset, compose(0, 1));
 
         let m2 = TestMessage::new(2, 10);
         let p1 = producer
@@ -636,8 +653,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(p1.len(), 2);
-        assert_eq!(p1[0].offset, (1u64 << 32) | 0);
-        assert_eq!(p1[1].offset, (1u64 << 32) | 1);
+        assert_eq!(p1[0].offset, compose(1, 0));
+        assert_eq!(p1[1].offset, compose(1, 1));
 
         let key0 = format!("{}/{:020}.dat", producer.prefix, 0);
         let key1 = format!("{}/{:020}.dat", producer.prefix, 1);
@@ -648,11 +665,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r0.len(), 2);
-        assert_eq!(r0[0].offset, (0u64 << 32) | 0);
-        assert_eq!(r0[1].offset, (0u64 << 32) | 1);
+        assert_eq!(r0[0].offset, compose(0, 0));
+        assert_eq!(r0[1].offset, compose(0, 1));
         assert_eq!(r1.len(), 2);
-        assert_eq!(r1[0].offset, (1u64 << 32) | 0);
-        assert_eq!(r1[1].offset, (1u64 << 32) | 1);
+        assert_eq!(r1[0].offset, compose(1, 0));
+        assert_eq!(r1[1].offset, compose(1, 1));
     }
 
     #[tokio::test]
