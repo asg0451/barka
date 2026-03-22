@@ -57,11 +57,11 @@ RUN echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu
 RUN echo "ubuntu:ubuntu" | chpasswd
 
 ########################################################
-# Rust (stable; edition 2024)
+# Rust (nightly; matches typical barka / CI toolchains)
 ########################################################
 USER ubuntu
 WORKDIR /home/ubuntu
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal
 
 ENV PATH="/home/ubuntu/.cargo/bin:${PATH}"
 
