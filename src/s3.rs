@@ -207,6 +207,56 @@ pub async fn get_object_reader(
     Ok(body.reader())
 }
 
+/// Batch-delete objects by key. Silently succeeds on an empty list.
+/// Keys are capped at 1 000 per the S3 DeleteObjects API (matches our
+/// list_objects cap, so callers that list-then-delete are always safe).
+#[tracing::instrument(skip(client, keys), fields(count = keys.len()), err)]
+pub async fn delete_objects(client: &Client, bucket: &str, keys: Vec<String>) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    retry_with_backoff("delete objects", || {
+        let client = client.clone();
+        let bucket = bucket.to_owned();
+        let keys = keys.clone();
+        async move {
+            let objects: Vec<_> = match keys
+                .into_iter()
+                .map(|k| {
+                    aws_sdk_s3::types::ObjectIdentifier::builder()
+                        .key(k)
+                        .build()
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+            {
+                Ok(v) => v,
+                Err(e) => return RetryResult::Fail(anyhow::anyhow!(e)),
+            };
+            let delete = match aws_sdk_s3::types::Delete::builder()
+                .set_objects(Some(objects))
+                .build()
+            {
+                Ok(v) => v,
+                Err(e) => return RetryResult::Fail(anyhow::anyhow!(e)),
+            };
+            match client
+                .delete_objects()
+                .bucket(&bucket)
+                .delete(delete)
+                .send()
+                .await
+            {
+                Ok(_) => RetryResult::Done(()),
+                Err(e) if is_transient_s3_error(&e) => {
+                    RetryResult::Retry(anyhow::anyhow!(e).context("s3: delete objects"))
+                }
+                Err(e) => RetryResult::Fail(anyhow::anyhow!(e).context("s3: delete objects")),
+            }
+        }
+    })
+    .await
+}
+
 enum S3CASOutcome {
     AlreadyExists,
     RetryableConflict,

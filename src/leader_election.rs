@@ -159,9 +159,24 @@ impl LeaderElection {
         let epoch = last_epoch.unwrap_or(Epoch(0)).next();
         let key = epoch.to_key(&self.prefix);
 
+        let old_keys: Vec<String> = contents
+            .iter()
+            .filter_map(|obj| obj.key().map(str::to_owned))
+            .collect();
+
         match s3::put_if_absent(&self.s3_client, &self.bucket, &key, lock_file_body).await? {
             PutOutcome::Created => {
                 tracing::info!(epoch = epoch.0, "became leader");
+                // clean up old lock files
+                if !old_keys.is_empty() {
+                    let client = self.s3_client.clone();
+                    let bucket = self.bucket.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = s3::delete_objects(&client, &bucket, old_keys).await {
+                            tracing::warn!(error = %e, "failed to clean up old lock files");
+                        }
+                    });
+                }
                 Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
                     valid_until_ms,
                     epoch,
@@ -180,9 +195,32 @@ mod tests {
     use super::*;
     use crate::s3::{self, S3Config};
 
+    const LOCALSTACK_ENDPOINT: &str = "http://localhost:4566";
+
+    async fn require_localstack() {
+        static CHECKED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        if CHECKED.get().is_some() {
+            return;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::net::TcpStream::connect("127.0.0.1:4566"),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                CHECKED.get_or_init(|| ());
+            }
+            _ => panic!(
+                "LocalStack not reachable at {LOCALSTACK_ENDPOINT}. \
+                 Start it with: docker run -d -p 4566:4566 localstack/localstack"
+            ),
+        }
+    }
+
     fn localstack_config(bucket: &str) -> S3Config {
         S3Config {
-            endpoint_url: Some("http://localhost:4566".into()),
+            endpoint_url: Some(LOCALSTACK_ENDPOINT.into()),
             bucket: bucket.into(),
             region: "us-east-1".into(),
         }
@@ -201,6 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_become_leader_empty_bucket() {
+        require_localstack().await;
         let bucket = unique_name("test-leader");
         let config = localstack_config(&bucket);
         let client = s3::build_client(&config).await;
@@ -226,6 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_second_node_not_leader() {
+        require_localstack().await;
         let bucket = unique_name("test-leader");
         let ns = unique_name("ns");
         let config = localstack_config(&bucket);
@@ -291,6 +331,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_same_leader_not_reacquired_while_valid() {
+        require_localstack().await;
         let bucket = unique_name("test-leader");
         let ns = unique_name("ns");
         let config = localstack_config(&bucket);
@@ -317,6 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_leader_acquired_after_time_expiry() {
+        require_localstack().await;
         let bucket = unique_name("test-leader");
         let ns = unique_name("ns");
         let config = localstack_config(&bucket);
@@ -353,6 +395,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_leader_acquired_after_manual_expiry() {
+        require_localstack().await;
         let bucket = unique_name("test-leader");
         let ns = unique_name("ns");
         let config = localstack_config(&bucket);
@@ -389,6 +432,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_epoch_advances_past_highest_lock() {
+        require_localstack().await;
         let bucket = unique_name("test-leader");
         let ns = unique_name("ns");
         let config = localstack_config(&bucket);
@@ -426,7 +470,65 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_old_lock_files_cleaned_up_after_election() {
+        require_localstack().await;
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        for e in 1..=3u64 {
+            write_lock_file_direct(
+                &client,
+                &bucket,
+                &ns,
+                Epoch(e),
+                &LockFile {
+                    valid_until_ms: now_ms() - 60_000,
+                    expired: false,
+                    node_id: 99,
+                },
+            )
+            .await;
+        }
+
+        let prefix = lock_prefix(&ns);
+        let before = s3::list_objects(&client, &bucket, &prefix).await.unwrap();
+        assert_eq!(before.len(), 3, "precondition: 3 old lock files");
+
+        let le = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            namespace: ns,
+            s3_config: config,
+            validity_millis: None,
+        })
+        .await;
+
+        let result = le.try_become_leader().await.unwrap();
+        assert!(matches!(result, TryBecomeLeaderResult::Leader(_)));
+
+        // Cleanup is fire-and-forget; poll until old files are gone.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let remaining = s3::list_objects(&client, &bucket, &prefix).await.unwrap();
+            if remaining.len() == 1 {
+                let key = remaining[0].key().unwrap();
+                assert!(key.contains("/4.lock"), "only the new epoch should remain: {key}");
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "old lock files were not cleaned up in time, {} remain",
+                remaining.len(),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_racing_nodes_one_leader_empty_bucket() {
+        require_localstack().await;
         let bucket = unique_name("test-leader");
         let ns = unique_name("ns");
         let config = localstack_config(&bucket);
@@ -465,6 +567,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_racing_nodes_one_leader_after_expiry() {
+        require_localstack().await;
         let bucket = unique_name("test-leader");
         let ns = unique_name("ns");
         let config = localstack_config(&bucket);

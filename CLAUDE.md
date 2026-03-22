@@ -36,6 +36,17 @@ Two communication layers:
 - **No Raft**: Leadership is S3-based leases, not consensus protocol.
 - **No wrapper structs for capnp-rpc**: `Node` implements `barka_svc::Server` directly. It holds `Arc<Mutex<...>>` internally so it's cheap to clone. `serve_rpc` takes a `Node` by value, creates one capnp client, and clones it per connection (same pattern as [queueber](https://github.com/asg0451/queueber)). Don't introduce intermediate types to bridge capnp-rpc and shared state.
 
+### Leader election (`src/leader_election.rs`)
+- Based on [S3 conditional writes](https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/): list lock files, check newest, `put_if_absent` with `if-none-match: *` to claim the next epoch.
+- Lock files are scoped per namespace — listing must use `self.prefix` (`lock/{namespace}/`), not the global `lock/` prefix, otherwise namespaces interfere.
+- When `try_become_leader` finds a valid lock belonging to the caller's own `node_id`, it returns `Leader` (not `NotLeader`), so callers can safely poll without losing track of their leadership.
+- After winning an election, old epoch lock files are deleted via a fire-and-forget `tokio::spawn` (best-effort cleanup; failures are logged as warnings).
+
+### Running tests
+- Unit tests in `leader_election` require **LocalStack** running locally with S3 enabled: `docker run -d -p 4566:4566 localstack/localstack`
+- Tests use unique bucket names (timestamp + atomic counter) for isolation when running in parallel. The counter matters because macOS clock resolution can cause nanosecond-timestamp collisions.
+- Race-condition tests use `#[tokio::test(flavor = "multi_thread")]` with `tokio::sync::Barrier` to synchronize concurrent `try_become_leader` calls.
+
 ### Jepsen test structure (`jepsen/barka/`)
 - `db.clj` — starts/stops barka as a local process, waits for control port
 - `client.clj` — TCP/JSON client that talks to the control API
