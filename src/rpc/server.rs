@@ -92,3 +92,99 @@ impl barka_svc::Server for PerConnectionNode {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::{Node, NodeConfig};
+    use crate::rpc::client::BarkaClient;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rpc_produce_consume_round_trip() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let node = Node::new(NodeConfig {
+            rpc_addr: addr,
+            ..Default::default()
+        });
+
+        let server_node = node.clone();
+        let server = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
+                        let (reader, writer) = futures::AsyncReadExt::split(stream);
+                        let call_bytes_queue: MessageBytesQueue =
+                            Rc::new(RefCell::new(VecDeque::new()));
+                        let network = BytesVatNetwork::new(
+                            futures::io::BufReader::new(reader),
+                            futures::io::BufWriter::new(writer),
+                            rpc_twoparty_capnp::Side::Server,
+                            Default::default(),
+                            call_bytes_queue.clone(),
+                        );
+                        let per_conn = PerConnectionNode {
+                            node: server_node,
+                            msg_bytes: call_bytes_queue,
+                        };
+                        let client: barka_svc::Client = capnp_rpc::new_client(per_conn);
+                        let rpc = RpcSystem::new(Box::new(network), Some(client.client));
+                        rpc.await.unwrap();
+                    })
+                    .await;
+            });
+        });
+
+        let client = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
+                        let client = BarkaClient::connect(addr).await.unwrap();
+
+                        let base = client
+                            .produce("test-topic", 0, vec![b"hello".to_vec(), b"world".to_vec()])
+                            .await
+                            .unwrap();
+                        assert_eq!(base, 0);
+
+                        let base2 = client
+                            .produce("test-topic", 0, vec![b"third".to_vec()])
+                            .await
+                            .unwrap();
+                        assert_eq!(base2, 2);
+
+                        let records = client.consume("test-topic", 0, 0, 10).await.unwrap();
+                        assert_eq!(records.len(), 3);
+                        assert_eq!(records[0].value, b"hello");
+                        assert_eq!(records[1].value, b"world");
+                        assert_eq!(records[2].value, b"third");
+                        assert_eq!(records[0].offset, 0);
+                        assert_eq!(records[1].offset, 1);
+                        assert_eq!(records[2].offset, 2);
+
+                        let slice = client.consume("test-topic", 0, 1, 1).await.unwrap();
+                        assert_eq!(slice.len(), 1);
+                        assert_eq!(slice[0].value, b"world");
+                    })
+                    .await;
+            });
+        });
+
+        let (c, s) = tokio::join!(client, server);
+        c.unwrap();
+        s.unwrap();
+    }
+}
