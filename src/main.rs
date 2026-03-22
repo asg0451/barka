@@ -1,11 +1,13 @@
 use barka::node::{Node, NodeConfig};
 use barka::s3::{self, S3Config};
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
+        .with_span_events(FmtSpan::CLOSE)
         .init();
 
     let config = NodeConfig::from_env();

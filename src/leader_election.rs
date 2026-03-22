@@ -1,7 +1,8 @@
 // based on https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/
 
-use anyhow::{bail, Context, Result};
-use aws_sdk_s3::error::SdkError;
+use anyhow::{Context, Result, bail};
+use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
 use bytes::Buf;
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,7 @@ impl LeaderElection {
     // 7. Otherwise, another process already is the leader, so do nothing.
     //    Go back to 1. periodically
     // also we probably want a background process deleting old lock files..
+    #[tracing::instrument(skip_all, fields(node_id = self.node_id, prefix = self.prefix, bucket = self.bucket))]
     pub async fn try_become_leader(&self) -> Result<TryBecomeLeaderResult> {
         let lock_files = self
             .s3_client
@@ -123,9 +125,8 @@ impl LeaderElection {
                 .collect()
                 .await
                 .context("s3: read lock file body")?;
-            let newest_lock_file: LockFile =
-                serde_json::from_reader(newest_lock_file.reader())
-                    .context("deserialize lock file")?;
+            let newest_lock_file: LockFile = serde_json::from_reader(newest_lock_file.reader())
+                .context("deserialize lock file")?;
             // TODO: check if valid_until_ms is in the past too
             if !newest_lock_file.expired {
                 tracing::debug!(
@@ -162,24 +163,54 @@ impl LeaderElection {
             .send()
             .await;
         match put_res {
-            // TODO is that the right error code?
-            Err(SdkError::ServiceError(e))
-                if e.err().meta().code() == Some("PreconditionFailed") =>
-            {
-                return Ok(TryBecomeLeaderResult::NotLeader);
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!(e).context("s3: put lock file"));
-            }
             Ok(_) => {
                 tracing::info!(epoch = epoch.0, "became leader");
-                return Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
+                Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
                     valid_until_ms,
                     epoch,
-                }));
+                }))
             }
+            Err(e) => match classify_put_if_absent_error(&e) {
+                Some(S3CASOutcome::AlreadyExists) => {
+                    tracing::debug!("lock file already exists, not becoming leader");
+                    Ok(TryBecomeLeaderResult::NotLeader)
+                }
+                Some(S3CASOutcome::RetryableConflict) => {
+                    tracing::debug!("retryable CAS conflict, will retry... todo");
+                    Ok(TryBecomeLeaderResult::NotLeader)
+                }
+                None => Err(anyhow::anyhow!(e).context("s3: put lock file")),
+            },
         }
     }
+}
+
+enum S3CASOutcome {
+    AlreadyExists,
+    RetryableConflict,
+}
+
+fn classify_put_if_absent_error(err: &SdkError<PutObjectError>) -> Option<S3CASOutcome> {
+    let status = err.raw_response().map(|r| r.status().as_u16());
+    let code = err.code();
+
+    if status == Some(412) {
+        return Some(S3CASOutcome::AlreadyExists);
+    }
+    if status == Some(409) {
+        return Some(S3CASOutcome::RetryableConflict);
+    }
+
+    if let Some(c) = code {
+        if c == "PreconditionFailed" {
+            return Some(S3CASOutcome::AlreadyExists);
+        }
+        if c == "ConditionalRequestConflict" {
+            return Some(S3CASOutcome::RetryableConflict);
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
