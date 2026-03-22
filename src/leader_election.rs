@@ -21,18 +21,20 @@ pub struct Epoch(u64);
 
 impl Epoch {
     // format: {prefix}/{epoch}.lock
-    fn from_key(prefix: &str, key: &str) -> Result<Self> {
-        let bad_key = || anyhow::anyhow!("invalid lock file key: {key}");
-        let key = key.strip_prefix(prefix).with_context(bad_key)?;
+    fn from_key(key: &str) -> Result<Self> {
         let epoch = key
-            .split('.')
+            .split('/')
             .last()
-            .and_then(|e| e.parse::<u64>().ok())
-            .with_context(bad_key)?;
+            .unwrap()
+            .split('.')
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no epoch in key: {key}"))?
+            .parse::<u64>()
+            .with_context(|| anyhow::anyhow!("invalid epoch in key: {key}"))?;
         Ok(Self(epoch))
     }
     fn to_key(self, prefix: &str) -> String {
-        format!("{}/{}.lock", prefix, self.0)
+        format!("{}/{}.lock", prefix.trim_end_matches("/"), self.0)
     }
     fn next(self) -> Self {
         Self(self.0 + 1)
@@ -66,7 +68,11 @@ const VALIDITY_MILLIS: u64 = 10_000;
 impl LeaderElection {
     pub async fn new<S: AsRef<str>>(node_id: u64, namespace: S, s3_config: S3Config) -> Self {
         let s3_client = s3::build_client(&s3_config).await;
-        let prefix = format!("{}/{}/", LOCK_FILE_PREFIX, namespace.as_ref());
+        let prefix = format!(
+            "{}/{}/",
+            LOCK_FILE_PREFIX.trim_end_matches("/"),
+            namespace.as_ref()
+        );
         tracing::debug!(
             node_id = node_id,
             namespace = namespace.as_ref(),
@@ -92,14 +98,13 @@ impl LeaderElection {
     // also we probably want a background process deleting old lock files..
     #[tracing::instrument(skip_all, fields(node_id = self.node_id, prefix = self.prefix, bucket = self.bucket), err, ret)]
     pub async fn try_become_leader(&self) -> Result<TryBecomeLeaderResult> {
-        let contents =
-            s3::list_objects(&self.s3_client, &self.bucket, LOCK_FILE_PREFIX).await?;
+        let contents = s3::list_objects(&self.s3_client, &self.bucket, LOCK_FILE_PREFIX).await?;
 
         let mut last_epoch = None;
         if !contents.is_empty() {
             let newest = contents.last().unwrap();
             let key = newest.key().unwrap();
-            last_epoch = Some(Epoch::from_key(&self.prefix, key)?);
+            last_epoch = Some(Epoch::from_key(key)?);
             let reader = s3::get_object_reader(&self.s3_client, &self.bucket, key).await?;
             let lock_file: LockFile =
                 serde_json::from_reader(reader).context("deserialize lock file")?;
