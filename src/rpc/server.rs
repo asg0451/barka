@@ -1,12 +1,14 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use capnp_rpc::RpcSystem;
 use capnp_rpc::rpc_twoparty_capnp;
 use futures::AsyncReadExt;
+use lru::LruCache;
 use tokio::net::TcpListener;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info};
@@ -18,7 +20,9 @@ use crate::rpc::barka_capnp::{consume_svc, produce_svc};
 use crate::rpc::bytes_transport::{BytesVatNetwork, MessageBytesQueue};
 use crate::s3::S3Config;
 
-type ConsumerMap = Rc<RefCell<HashMap<(String, u32), Arc<PartitionConsumer>>>>;
+const MAX_CACHED_CONSUMERS: usize = 256;
+
+type ConsumerCache = Rc<RefCell<LruCache<(String, u32), Arc<PartitionConsumer>>>>;
 
 pub async fn serve_produce_rpc(partitions: PartitionMap, addr: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -83,20 +87,17 @@ impl produce_svc::Server for PerConnectionProduceNode {
             .pop_front()
             .ok_or_else(|| capnp::Error::failed("missing message bytes".into()))?;
         let req = params.get()?.get_request()?;
-        let topic = req.get_topic()?.to_string()?;
-        let partition = req.get_partition();
+        let key = (req.get_topic()?.to_string()?, req.get_partition());
 
-        let state = self
-            .partitions
-            .get(&(topic.clone(), partition))
-            .ok_or_else(|| {
-                capnp::Error::failed(format!(
-                    "partition {topic}/{partition} not configured on this node"
-                ))
-            })?;
+        let state = self.partitions.get(&key).ok_or_else(|| {
+            capnp::Error::failed(format!(
+                "partition {}/{} not configured on this node",
+                key.0, key.1
+            ))
+        })?;
 
         let epoch = state.leadership.check_leader().ok_or_else(|| {
-            capnp::Error::failed(format!("not leader for partition {topic}/{partition}"))
+            capnp::Error::failed(format!("not leader for partition {}/{}", key.0, key.1))
         })?;
 
         let produced = state
@@ -124,7 +125,9 @@ pub async fn serve_consume_rpc(
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "consume-rpc listening");
 
-    let consumers: ConsumerMap = Rc::new(RefCell::new(HashMap::new()));
+    let consumers: ConsumerCache = Rc::new(RefCell::new(LruCache::new(
+        NonZeroUsize::new(MAX_CACHED_CONSUMERS).unwrap(),
+    )));
 
     let local = tokio::task::LocalSet::new();
     local
@@ -169,7 +172,7 @@ pub async fn serve_consume_rpc(
 }
 
 struct PerConnectionConsumeNode {
-    consumers: ConsumerMap,
+    consumers: ConsumerCache,
     s3_config: S3Config,
     base_prefix: String,
 }
@@ -182,8 +185,8 @@ impl PerConnectionConsumeNode {
     ) -> Result<Arc<PartitionConsumer>, capnp::Error> {
         let key = (topic.to_string(), partition);
         {
-            let map = self.consumers.borrow();
-            if let Some(c) = map.get(&key) {
+            let mut cache = self.consumers.borrow_mut();
+            if let Some(c) = cache.get(&key) {
                 return Ok(Arc::clone(c));
             }
         }
@@ -201,9 +204,12 @@ impl PerConnectionConsumeNode {
         )
         .await
         .map_err(|e| capnp::Error::failed(e.to_string()))?;
-        self.consumers
-            .borrow_mut()
-            .insert(key, Arc::clone(&consumer));
+        // Re-check after await: another task may have inserted while we yielded.
+        let mut cache = self.consumers.borrow_mut();
+        if let Some(existing) = cache.get(&key) {
+            return Ok(Arc::clone(existing));
+        }
+        cache.put(key, Arc::clone(&consumer));
         Ok(consumer)
     }
 }
@@ -244,6 +250,7 @@ impl consume_svc::Server for PerConnectionConsumeNode {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::pin::pin;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
@@ -312,7 +319,9 @@ mod tests {
     fn make_consume_node(s3_config: &S3Config, s3_prefix: &str) -> PerConnectionConsumeNode {
         let base_prefix = segment_key_prefix(Some(s3_prefix));
         PerConnectionConsumeNode {
-            consumers: Rc::new(RefCell::new(HashMap::new())),
+            consumers: Rc::new(RefCell::new(LruCache::new(
+                NonZeroUsize::new(MAX_CACHED_CONSUMERS).unwrap(),
+            ))),
             s3_config: s3_config.clone(),
             base_prefix,
         }
