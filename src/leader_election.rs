@@ -161,7 +161,7 @@ impl LeaderElection {
 
                         if remaining_ms < self.validity_millis / 2 {
                             // Renew the lease before it expires
-                            return self.renew_lease(key, epoch).await;
+                            return self.renew_lease(key, epoch, lock_file.valid_until_ms).await;
                         }
 
                         tracing::debug!(
@@ -242,16 +242,20 @@ impl LeaderElection {
     }
 
     /// Overwrite our lock file with a fresh TTL, then re-list to verify no newer epoch appeared.
-    async fn renew_lease(&self, key: &str, epoch: Epoch) -> Result<TryBecomeLeaderResult> {
+    async fn renew_lease(
+        &self,
+        key: &str,
+        epoch: Epoch,
+        original_valid_until_ms: u64,
+    ) -> Result<TryBecomeLeaderResult> {
         const RENEW_ATTEMPTS: u32 = 3;
-        let mut new_valid_until = 0u64;
 
         for attempt in 0..RENEW_ATTEMPTS {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
-            new_valid_until = now + self.validity_millis;
+            let new_valid_until = now + self.validity_millis;
 
             let body = serde_json::to_string(&LockFile {
                 valid_until_ms: new_valid_until,
@@ -268,17 +272,22 @@ impl LeaderElection {
 
             match s3::list_objects(&self.s3_client, &self.bucket, &self.prefix).await {
                 Ok(fresh_contents) => {
-                    if let Some(newest) = fresh_contents.last()
-                        && let Some(newest_key) = newest.key()
-                    {
-                        let fresh_epoch = Epoch::from_key(newest_key)?;
-                        if fresh_epoch != epoch {
-                            tracing::warn!(
-                                our_epoch = epoch.0,
-                                fresh_epoch = fresh_epoch.0,
-                                "newer epoch appeared during renewal"
-                            );
-                            return Ok(TryBecomeLeaderResult::NotLeader);
+                    let newest_key = fresh_contents.last().and_then(|o| o.key());
+                    match newest_key {
+                        Some(newest_key) => {
+                            let fresh_epoch = Epoch::from_key(newest_key)?;
+                            if fresh_epoch != epoch {
+                                tracing::warn!(
+                                    our_epoch = epoch.0,
+                                    fresh_epoch = fresh_epoch.0,
+                                    "newer epoch appeared during renewal"
+                                );
+                                return Ok(TryBecomeLeaderResult::NotLeader);
+                            }
+                        }
+                        None => {
+                            tracing::warn!("empty lock listing after renewal put, retrying");
+                            continue;
                         }
                     }
                     tracing::debug!(epoch = epoch.0, new_valid_until, "renewed lease");
@@ -297,7 +306,7 @@ impl LeaderElection {
         // All renewal attempts failed -- still within TTL, next poll will retry
         tracing::warn!("lease renewal failed after {RENEW_ATTEMPTS} attempts, using remaining TTL");
         Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
-            valid_until_ms: new_valid_until,
+            valid_until_ms: original_valid_until_ms,
             epoch,
         }))
     }
