@@ -1,0 +1,10 @@
+---
+description: Load project context and conventions before substantive work
+alwaysApply: true
+---
+
+# Barka project context
+
+Before non-trivial changes (more than a one-line fix), read [`AGENTS.md`](../../AGENTS.md) and [`CLAUDE.md`](../../CLAUDE.md) and follow them—including architecture notes, build/test commands (e.g. LocalStack for tests, `cargo clippy -- -D warnings` before push), and the working-style section in `CLAUDE.md` (e.g. check [`tasks/lessons.md`](../../tasks/lessons.md) when relevant).
+
+If a task touches leadership, epochs, or flushes, apply the concurrency lesson in `tasks/lessons.md`.

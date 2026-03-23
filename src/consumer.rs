@@ -317,8 +317,10 @@ async fn io_loop(
 mod tests {
     use super::*;
     use crate::log_offset::compose;
+    use crate::node::LeadershipState;
     use crate::producer::PartitionProducer;
     use crate::test_util::TestMessage;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -378,13 +380,15 @@ mod tests {
             .unwrap();
 
         let prefix = unique_prefix();
+        let leadership = Arc::new(LeadershipState::new());
+        leadership.set_leader(u64::MAX, 0);
         let producer = PartitionProducer::with_opts(
             &s3_config,
             prefix.clone(),
             3, // max_records = 3 so each produce fills a segment
             1024 * 1024,
             std::time::Duration::from_secs(60),
-            None,
+            Arc::clone(&leadership),
         )
         .await
         .unwrap();
@@ -474,13 +478,15 @@ mod tests {
             .unwrap();
 
         let prefix = unique_prefix();
+        let leadership = Arc::new(LeadershipState::new());
+        leadership.set_leader(u64::MAX, 0);
         let producer = PartitionProducer::with_opts(
             &s3_config,
             prefix.clone(),
             3,
             1024 * 1024,
             std::time::Duration::from_secs(60),
-            None,
+            Arc::clone(&leadership),
         )
         .await
         .unwrap();
