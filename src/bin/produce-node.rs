@@ -86,6 +86,10 @@ struct Cli {
     /// Topic configuration: TOPIC:NUM_PARTITIONS[,TOPIC:NUM_PARTITIONS,...]
     #[arg(long, env = "BARKA_TOPICS", default_value = "default:1", value_parser = parse_topics)]
     topics: TopicConfigs,
+
+    /// Seconds to back off from leader election after an abdication.
+    #[arg(long, env = "BARKA_ABDICATION_COOLDOWN_SECS", default_value_t = 60)]
+    abdication_cooldown_secs: u64,
 }
 
 impl Cli {
@@ -116,6 +120,7 @@ impl Cli {
             leader_election_poll_secs: self.leader_election_poll_secs,
             leader_election_prefix: self.leader_election_prefix.clone(),
             topics: self.topics.0.clone(),
+            abdication_cooldown_secs: self.abdication_cooldown_secs,
         }
     }
 

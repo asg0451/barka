@@ -42,6 +42,7 @@ struct SegmentData {
 
 interface ProduceSvc {
   produce @0 (request :ProduceRequest) -> (response :ProduceResponse);
+  abdicate @1 (topic :Text, partition :UInt32) -> (success :Bool);
 }
 
 interface ConsumeSvc {
