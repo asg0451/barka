@@ -62,6 +62,8 @@ pub struct LeadershipInfo {
 pub struct LeaderElectionConfig {
     pub node_id: u64,
     pub namespace: String,
+    /// Optional path segment before `lock/`; keys are `{prefix}/lock/{namespace}/` when set.
+    pub leader_election_prefix: Option<String>,
     pub s3_config: S3Config,
     pub validity_millis: Option<u64>,
 }
@@ -78,17 +80,31 @@ const VALIDITY_MILLIS: u64 = 10_000;
 /// Restart from `list_objects` when a listed lock key is deleted before `get_object` (e.g. winner cleanup).
 const TRY_BECOME_LEADER_MAX_LIST_GET_RACES: u32 = 64;
 
+/// S3 key prefix for lock files: `{leader_election_prefix}/lock/{namespace}/` when a prefix is set,
+/// otherwise `lock/{namespace}/`. The namespace is the topic-partition identifier.
+fn leader_lock_s3_prefix(leader_election_prefix: Option<&str>, namespace: &str) -> String {
+    let lock = LOCK_FILE_PREFIX.trim_end_matches('/');
+    let extra = leader_election_prefix
+        .map(str::trim)
+        .map(|p| p.trim_matches('/'))
+        .filter(|p| !p.is_empty());
+    match extra {
+        Some(ep) => format!("{}/{}/{}/", ep, lock, namespace),
+        None => format!("{}/{}/", lock, namespace),
+    }
+}
+
 impl LeaderElection {
     pub async fn new(config: LeaderElectionConfig) -> Self {
         let s3_client = s3::build_client(&config.s3_config).await;
-        let prefix = format!(
-            "{}/{}/",
-            LOCK_FILE_PREFIX.trim_end_matches("/"),
+        let prefix = leader_lock_s3_prefix(
+            config.leader_election_prefix.as_deref(),
             &config.namespace,
         );
         tracing::debug!(
             node_id = config.node_id,
             namespace = %config.namespace,
+            leader_election_prefix = ?config.leader_election_prefix,
             "leader election initialized"
         );
         Self {
@@ -280,6 +296,20 @@ mod tests {
         format!("{prefix}-{ts}-{n}")
     }
 
+    #[test]
+    fn leader_lock_s3_prefix_formatting() {
+        assert_eq!(leader_lock_s3_prefix(None, "topic-0"), "lock/topic-0/");
+        assert_eq!(
+            leader_lock_s3_prefix(Some("cluster-a"), "topic-0"),
+            "cluster-a/lock/topic-0/"
+        );
+        assert_eq!(
+            leader_lock_s3_prefix(Some("  staging/ "), "topic-0"),
+            "staging/lock/topic-0/"
+        );
+        assert_eq!(leader_lock_s3_prefix(Some(""), "topic-0"), "lock/topic-0/");
+    }
+
     #[tokio::test]
     async fn test_become_leader_empty_bucket() {
         require_localstack().await;
@@ -291,6 +321,7 @@ mod tests {
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
             namespace: "test-ns".into(),
+            leader_election_prefix: None,
             s3_config: config.clone(),
             validity_millis: Some(10_000),
         })
@@ -318,6 +349,7 @@ mod tests {
         let le1 = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
             namespace: ns.clone(),
+            leader_election_prefix: None,
             s3_config: config.clone(),
             validity_millis: None,
         })
@@ -328,6 +360,7 @@ mod tests {
         let le2 = LeaderElection::new(LeaderElectionConfig {
             node_id: 2,
             namespace: ns.clone(),
+            leader_election_prefix: None,
             s3_config: config.clone(),
             validity_millis: None,
         })
@@ -347,7 +380,7 @@ mod tests {
     }
 
     fn lock_prefix(namespace: &str) -> String {
-        format!("{}{}/", LOCK_FILE_PREFIX, namespace)
+        leader_lock_s3_prefix(None, namespace)
     }
 
     /// Unconditionally write a lock file to S3, bypassing the leader election
@@ -384,6 +417,7 @@ mod tests {
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -424,6 +458,7 @@ mod tests {
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 2,
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -461,6 +496,7 @@ mod tests {
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 3,
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -500,6 +536,7 @@ mod tests {
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 7,
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -524,6 +561,7 @@ mod tests {
         let le1 = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
             namespace: ns.clone(),
+            leader_election_prefix: None,
             s3_config: config.clone(),
             validity_millis: None,
         })
@@ -546,6 +584,7 @@ mod tests {
         let le2 = LeaderElection::new(LeaderElectionConfig {
             node_id: 2,
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -589,6 +628,7 @@ mod tests {
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -639,6 +679,7 @@ mod tests {
                 let le = LeaderElection::new(LeaderElectionConfig {
                     node_id: i as u64,
                     namespace: ns,
+                    leader_election_prefix: None,
                     s3_config: config,
                     validity_millis: None,
                 })
@@ -655,6 +696,44 @@ mod tests {
             }
         }
         assert_eq!(leaders, 1, "exactly one node should become leader");
+    }
+
+    #[tokio::test]
+    async fn test_election_prefix_isolates_same_namespace() {
+        require_localstack().await;
+        let bucket = unique_name("test-leader");
+        let ns = "shared-topic-partition";
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let le_a = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            namespace: ns.into(),
+            leader_election_prefix: Some("cluster-a".into()),
+            s3_config: config.clone(),
+            validity_millis: None,
+        })
+        .await;
+        let le_b = LeaderElection::new(LeaderElectionConfig {
+            node_id: 2,
+            namespace: ns.into(),
+            leader_election_prefix: Some("cluster-b".into()),
+            s3_config: config,
+            validity_millis: None,
+        })
+        .await;
+
+        let r_a = le_a.try_become_leader().await.unwrap();
+        let r_b = le_b.try_become_leader().await.unwrap();
+        assert!(
+            matches!(r_a, TryBecomeLeaderResult::Leader(_)),
+            "cluster-a should elect a leader: {r_a:?}"
+        );
+        assert!(
+            matches!(r_b, TryBecomeLeaderResult::Leader(_)),
+            "cluster-b should elect independently: {r_b:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -691,6 +770,7 @@ mod tests {
                 let le = LeaderElection::new(LeaderElectionConfig {
                     node_id: i as u64,
                     namespace: ns,
+                    leader_election_prefix: None,
                     s3_config: config,
                     validity_millis: None,
                 })

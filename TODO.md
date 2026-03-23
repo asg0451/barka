@@ -1,5 +1,5 @@
 - [ ] separate producer nodes from consumer nodes entirely
-- [ ] add cli arg for leader election prefix as well. should go before the namespace. (namespace = topic-partition)
+- [X] add cli arg for leader election prefix as well. should go before the namespace. (namespace = topic-partition)
 - [ ] try and make consume as zero copy as possible, like produce
 - [ ] add support for multiple topics and partitions
 - [ ] make a more sophisticated client which can examing topic-partition leadership state to route produce requests to the appropriate node, taking expiry and retries into account.

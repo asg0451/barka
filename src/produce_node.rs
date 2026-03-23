@@ -28,6 +28,8 @@ pub struct ProduceNodeConfig {
     pub s3_prefix: Option<String>,
     pub producer_limits: Option<ProducerBatchLimits>,
     pub leader_election_poll_secs: u64,
+    /// Path segment in S3 before `lock/` and the topic-partition namespace.
+    pub leader_election_prefix: Option<String>,
 }
 
 impl Default for ProduceNodeConfig {
@@ -38,6 +40,7 @@ impl Default for ProduceNodeConfig {
             s3_prefix: None,
             producer_limits: None,
             leader_election_poll_secs: 3,
+            leader_election_prefix: None,
         }
     }
 }
@@ -161,6 +164,7 @@ impl ProduceNode {
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: self.config.node_id,
             namespace: "test-0".into(),
+            leader_election_prefix: self.config.leader_election_prefix.clone(),
             s3_config: self.s3_config.clone(),
             validity_millis: None,
         })
