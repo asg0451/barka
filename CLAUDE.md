@@ -43,7 +43,7 @@ Two communication layers (same backend; the gateway is a frontend only):
 - After winning an election, old epoch lock files are deleted via a fire-and-forget `tokio::spawn` (best-effort cleanup; failures are logged as warnings).
 
 ### Running tests
-- Unit tests in `leader_election` require **LocalStack** running locally with S3 enabled: `docker run -d -p 4566:4566 localstack/localstack`
+- S3-backed tests need **LocalStack** on `http://localhost:4566`. Prefer `make test` (runs `scripts/ensure-localstack.sh` then `cargo test`), or run `bash scripts/ensure-localstack.sh` once before `cargo test`. Cursor cloud agents also run that script from `.cursor/environment.json` during `install` / `start`.
 - Tests use unique bucket names (timestamp + atomic counter) for isolation when running in parallel. The counter matters because macOS clock resolution can cause nanosecond-timestamp collisions.
 - Race-condition tests use `#[tokio::test(flavor = "multi_thread")]` with `tokio::sync::Barrier` to synchronize concurrent `try_become_leader` calls.
 
