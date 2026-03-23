@@ -5,14 +5,14 @@ use futures::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
-use crate::rpc::barka_capnp::barka_svc;
+use crate::rpc::barka_capnp::{consume_svc, produce_svc};
 
-/// Cap'n Proto RPC client. Must be used within a tokio LocalSet.
-pub struct BarkaClient {
-    client: barka_svc::Client,
+/// Cap'n Proto RPC client for produce operations. Must be used within a tokio LocalSet.
+pub struct ProduceClient {
+    client: produce_svc::Client,
 }
 
-impl BarkaClient {
+impl ProduceClient {
     pub async fn connect(addr: SocketAddr) -> anyhow::Result<Self> {
         let stream = TcpStream::connect(addr).await?;
         let stream = stream.compat();
@@ -26,11 +26,11 @@ impl BarkaClient {
         );
 
         let mut rpc = RpcSystem::new(Box::new(network), None);
-        let client: barka_svc::Client = rpc.bootstrap(rpc_twoparty_capnp::Side::Server);
+        let client: produce_svc::Client = rpc.bootstrap(rpc_twoparty_capnp::Side::Server);
 
         tokio::task::spawn_local(async move {
             if let Err(e) = rpc.await {
-                tracing::error!(%e, "rpc client error");
+                tracing::error!(%e, "produce rpc client error");
             }
         });
 
@@ -72,6 +72,37 @@ impl BarkaClient {
             });
         }
         Ok(out)
+    }
+}
+
+/// Cap'n Proto RPC client for consume operations. Must be used within a tokio LocalSet.
+pub struct ConsumeClient {
+    client: consume_svc::Client,
+}
+
+impl ConsumeClient {
+    pub async fn connect(addr: SocketAddr) -> anyhow::Result<Self> {
+        let stream = TcpStream::connect(addr).await?;
+        let stream = stream.compat();
+        let (reader, writer) = stream.split();
+
+        let network = twoparty::VatNetwork::new(
+            futures::io::BufReader::new(reader),
+            futures::io::BufWriter::new(writer),
+            rpc_twoparty_capnp::Side::Client,
+            Default::default(),
+        );
+
+        let mut rpc = RpcSystem::new(Box::new(network), None);
+        let client: consume_svc::Client = rpc.bootstrap(rpc_twoparty_capnp::Side::Server);
+
+        tokio::task::spawn_local(async move {
+            if let Err(e) = rpc.await {
+                tracing::error!(%e, "consume rpc client error");
+            }
+        });
+
+        Ok(Self { client })
     }
 
     pub async fn consume(

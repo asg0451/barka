@@ -1,6 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 
-use barka::node::{Node, NodeConfig, ProducerBatchLimits};
+use barka::produce_node::{ProduceNode, ProduceNodeConfig, ProducerBatchLimits};
 use barka::producer;
 use barka::s3::{self, S3Config};
 use clap::Parser;
@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Parser)]
-#[command(name = "barka", version, about = "Barka distributed log node")]
+#[command(name = "produce-node", version, about = "Barka produce node")]
 struct Cli {
     #[arg(long, env = "BARKA_NODE_ID", default_value_t = 0)]
     node_id: u64,
@@ -16,13 +16,9 @@ struct Cli {
     #[arg(long, env = "BARKA_RPC_PORT", default_value_t = 9292)]
     rpc_port: u16,
 
-    #[arg(long, env = "BARKA_JEPSEN_GATEWAY_PORT", default_value_t = 9293)]
-    jepsen_gateway_port: u16,
-
     #[arg(long, default_value = "127.0.0.1")]
     bind: IpAddr,
 
-    /// S3 API endpoint (e.g. http://localhost:4566 for LocalStack)
     #[arg(long, env = "AWS_ENDPOINT_URL")]
     s3_endpoint: Option<String>,
 
@@ -35,25 +31,21 @@ struct Cli {
     #[arg(long, env = "BARKA_S3_PREFIX")]
     s3_prefix: Option<String>,
 
-    /// Max records per produce request and per segment batch (default if flag omitted: production default).
     #[arg(long, env = "BARKA_PRODUCER_MAX_RECORDS")]
     producer_max_records: Option<usize>,
 
-    /// Max Cap'n Proto message size (words×8) per produce request / batch (default if flag omitted: production default).
     #[arg(long, env = "BARKA_PRODUCER_MAX_BYTES")]
     producer_max_bytes: Option<usize>,
 
-    /// Milliseconds to wait before flushing a non-full batch (default if flag omitted: production default).
     #[arg(long, env = "BARKA_PRODUCER_LINGER_MS")]
     producer_linger_ms: Option<u64>,
 
-    /// Seconds between leader-election attempts in the background loop.
     #[arg(long, env = "BARKA_LEADER_ELECTION_POLL_SECS", default_value_t = 3)]
     leader_election_poll_secs: u64,
 }
 
 impl Cli {
-    fn node_config(&self) -> NodeConfig {
+    fn node_config(&self) -> ProduceNodeConfig {
         let producer_limits = if self.producer_max_records.is_some()
             || self.producer_max_bytes.is_some()
             || self.producer_linger_ms.is_some()
@@ -72,10 +64,9 @@ impl Cli {
         } else {
             None
         };
-        NodeConfig {
+        ProduceNodeConfig {
             node_id: self.node_id,
             rpc_addr: SocketAddr::new(self.bind, self.rpc_port),
-            jepsen_gateway_addr: SocketAddr::new(self.bind, self.jepsen_gateway_port),
             s3_prefix: self.s3_prefix.clone(),
             producer_limits,
             leader_election_poll_secs: self.leader_election_poll_secs,
@@ -104,15 +95,16 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         node_id = config.node_id,
+        rpc_addr = %config.rpc_addr,
         s3_endpoint = s3_config.endpoint_url.as_deref().unwrap_or("aws"),
         s3_bucket = %s3_config.bucket,
-        "starting barka",
+        "starting produce-node",
     );
 
     let s3_client = s3::build_client(&s3_config).await;
     s3::ensure_bucket(&s3_client, &s3_config.bucket).await?;
 
-    let node = Node::new(config, &s3_config).await?;
+    let node = ProduceNode::new(config, &s3_config).await?;
     node.serve().await?;
     Ok(())
 }

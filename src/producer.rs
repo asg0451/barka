@@ -9,7 +9,7 @@ use tracing::{Instrument, warn};
 
 use crate::{
     log_offset::{self, compose},
-    node::LeadershipState,
+    produce_node::LeadershipState,
     rpc::barka_capnp::produce_request,
     s3::{self, S3Config},
     segment::{self, RecordData},
@@ -479,7 +479,7 @@ impl PartitionProducer {
 mod tests {
     use super::*;
     use crate::log_offset::compose;
-    use crate::node::LeadershipState;
+    use crate::produce_node::LeadershipState;
     use crate::test_util::TestMessage;
     use std::sync::atomic::AtomicU32;
 
