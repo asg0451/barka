@@ -61,7 +61,7 @@ async fn run_session(
     consume_rpc_addr: SocketAddr,
     s3_config: S3Config,
 ) -> anyhow::Result<()> {
-    let mut produce = ProduceRouter::new(&s3_config).await;
+    let mut produce = ProduceRouter::new(&s3_config, None).await;
     let mut consume_client = connect_consume_with_retry(consume_rpc_addr).await?;
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();

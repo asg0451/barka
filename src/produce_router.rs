@@ -14,6 +14,7 @@ const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 pub struct ProduceRouter {
     s3_client: aws_sdk_s3::Client,
     bucket: String,
+    leader_election_prefix: Option<String>,
     cached: Option<CachedLeader>,
 }
 
@@ -24,11 +25,12 @@ struct CachedLeader {
 }
 
 impl ProduceRouter {
-    pub async fn new(s3_config: &S3Config) -> Self {
+    pub async fn new(s3_config: &S3Config, leader_election_prefix: Option<String>) -> Self {
         let s3_client = crate::s3::build_client(s3_config).await;
         Self {
             s3_client,
             bucket: s3_config.bucket.clone(),
+            leader_election_prefix,
             cached: None,
         }
     }
@@ -37,7 +39,7 @@ impl ProduceRouter {
         &mut self,
         topic: &str,
         partition: u32,
-        values: Vec<Vec<u8>>,
+        mut values: Vec<Vec<u8>>,
     ) -> Result<Vec<Record>> {
         let namespace = leader_namespace(topic, partition);
 
@@ -52,7 +54,7 @@ impl ProduceRouter {
                     &self.s3_client,
                     &self.bucket,
                     &namespace,
-                    None,
+                    self.leader_election_prefix.as_deref(),
                 )
                 .await
                 .context("read current leader")?;
@@ -82,11 +84,12 @@ impl ProduceRouter {
             }
 
             let cached = self.cached.as_ref().unwrap();
-            match cached
-                .client
-                .produce(topic, partition, values.clone())
-                .await
-            {
+            let v = if attempt < MAX_RETRIES {
+                values.clone()
+            } else {
+                std::mem::take(&mut values)
+            };
+            match cached.client.produce(topic, partition, v).await {
                 Ok(records) => return Ok(records),
                 Err(e) => {
                     let msg = e.to_string();
