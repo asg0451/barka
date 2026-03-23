@@ -97,10 +97,8 @@ fn leader_lock_s3_prefix(leader_election_prefix: Option<&str>, namespace: &str) 
 impl LeaderElection {
     pub async fn new(config: LeaderElectionConfig) -> Self {
         let s3_client = s3::build_client(&config.s3_config).await;
-        let prefix = leader_lock_s3_prefix(
-            config.leader_election_prefix.as_deref(),
-            &config.namespace,
-        );
+        let prefix =
+            leader_lock_s3_prefix(config.leader_election_prefix.as_deref(), &config.namespace);
         tracing::debug!(
             node_id = config.node_id,
             namespace = %config.namespace,
