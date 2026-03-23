@@ -210,7 +210,7 @@ pub async fn get_object_bytes_if_present(
     client: &Client,
     bucket: &str,
     key: &str,
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Option<Bytes>> {
     retry_with_backoff("get object bytes", || {
         let client = client.clone();
         let bucket = bucket.to_owned();
@@ -225,7 +225,7 @@ pub async fn get_object_bytes_if_present(
                 Err(e) => return RetryResult::Fail(anyhow::anyhow!(e).context("s3: get object")),
             };
             match output.body.collect().await {
-                Ok(body) => RetryResult::Done(Some(body.into_bytes().to_vec())),
+                Ok(body) => RetryResult::Done(Some(body.into_bytes())),
                 Err(e) => RetryResult::Retry(anyhow::anyhow!(e).context("s3: read object body")),
             }
         }

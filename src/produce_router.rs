@@ -2,8 +2,9 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 
-use crate::leader_election::{self, leader_namespace};
+use crate::leader_election;
 use crate::log::record::Record;
+use crate::node::leader_namespace;
 use crate::rpc::client::ProduceClient;
 use crate::s3::S3Config;
 
@@ -47,10 +48,14 @@ impl ProduceRouter {
             }
 
             if !self.cache_valid() {
-                let leader =
-                    leader_election::read_current_leader(&self.s3_client, &self.bucket, &namespace)
-                        .await
-                        .context("read current leader")?;
+                let leader = leader_election::read_current_leader(
+                    &self.s3_client,
+                    &self.bucket,
+                    &namespace,
+                    None,
+                )
+                .await
+                .context("read current leader")?;
 
                 let leader = match leader {
                     Some(l) => l,

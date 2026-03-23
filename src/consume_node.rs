@@ -1,7 +1,5 @@
 use std::net::SocketAddr;
-use std::sync::Arc;
 
-use crate::consumer::{ConsumerConfig, PartitionConsumer};
 use crate::node::segment_key_prefix;
 use crate::rpc::server::serve_consume_rpc;
 use crate::s3::S3Config;
@@ -23,39 +21,31 @@ impl Default for ConsumeNodeConfig {
 
 pub struct ConsumeNode {
     pub config: ConsumeNodeConfig,
-    pub consumer: Arc<PartitionConsumer>,
+    pub s3_config: S3Config,
+    pub base_prefix: String,
 }
 
 impl ConsumeNode {
     pub async fn new(config: ConsumeNodeConfig, s3_config: &S3Config) -> anyhow::Result<Self> {
-        let prefix = segment_key_prefix(config.s3_prefix.as_deref());
-        let partition_prefix = format!("{prefix}/test/0");
-        let cache_dir = std::env::temp_dir()
-            .join("barka-segment-cache")
-            .join(partition_prefix.replace('/', "-"));
-        let consumer = PartitionConsumer::new(
-            s3_config,
-            partition_prefix,
-            ConsumerConfig {
-                cache_dir,
-                ..Default::default()
-            },
-        )
-        .await?;
-
-        Ok(Self { config, consumer })
+        let base_prefix = segment_key_prefix(config.s3_prefix.as_deref());
+        Ok(Self {
+            config,
+            s3_config: s3_config.clone(),
+            base_prefix,
+        })
     }
 
     pub async fn serve(&self) -> anyhow::Result<()> {
         let rpc_addr = self.config.rpc_addr;
-        let consumer = Arc::clone(&self.consumer);
+        let s3_config = self.s3_config.clone();
+        let base_prefix = self.base_prefix.clone();
 
         let rpc_handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(serve_consume_rpc(consumer, rpc_addr))
+            rt.block_on(serve_consume_rpc(s3_config, base_prefix, rpc_addr))
         });
 
         tokio::task::spawn_blocking(move || rpc_handle.join().unwrap())

@@ -71,7 +71,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let raw = read_input(&cli.input)?;
-    let (epoch, records) = segment::decode(&raw)?;
+    let (epoch, records) = segment::decode(raw.into())?;
 
     let json_records: Vec<JsonRecord> = records
         .into_iter()

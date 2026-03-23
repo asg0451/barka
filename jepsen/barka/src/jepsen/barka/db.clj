@@ -108,7 +108,8 @@
               idx              (node-idx node)
               s3-prefix        (str "jepsen/" run-id)
               base-env         (s3-env s3-prefix)
-              log-dir          (store/path! test "barka-logs" (str node))]
+              log-dir          (store/path! test "barka-logs" (str node))
+              _                (.mkdirs (java.io.File. (str log-dir)))]
 
           (info "starting barka" node
                 "produce-rpc=" produce-rpc-port

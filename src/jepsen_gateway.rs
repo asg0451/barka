@@ -62,12 +62,12 @@ async fn run_session(
     s3_config: S3Config,
 ) -> anyhow::Result<()> {
     let mut produce = ProduceRouter::new(&s3_config).await;
-    let consume_client = connect_consume_with_retry(consume_rpc_addr).await?;
+    let mut consume_client = connect_consume_with_retry(consume_rpc_addr).await?;
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        let response = handle_json_line(&mut produce, &consume_client, &line).await;
+        let response = handle_json_line(&mut produce, &mut consume_client, &line).await;
         let mut out = serde_json::to_string(&response).unwrap();
         out.push('\n');
         if writer.write_all(out.as_bytes()).await.is_err() {
@@ -137,7 +137,7 @@ struct JsonlResponse {
 
 async fn handle_json_line(
     produce: &mut ProduceRouter,
-    consume_client: &ConsumeClient,
+    consume_client: &mut ConsumeClient,
     line: &str,
 ) -> JsonlResponse {
     let req: JsonlRequest = match serde_json::from_str(line) {

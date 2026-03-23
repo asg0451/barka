@@ -535,7 +535,7 @@ mod tests {
         let mut reader = s3::get_object_reader(s3_client, bucket, key).await?;
         let mut buf = Vec::new();
         reader.read_to_end(&mut buf).unwrap();
-        segment::decode(&buf)
+        segment::decode(buf.into())
     }
 
     #[tokio::test]

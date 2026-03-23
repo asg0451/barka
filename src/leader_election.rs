@@ -62,6 +62,8 @@ pub struct LeaderElectionConfig {
     pub node_id: u64,
     pub addr: String,
     pub namespace: String,
+    /// Optional path segment before `lock/`; keys are `{prefix}/lock/{namespace}/` when set.
+    pub leader_election_prefix: Option<String>,
     pub s3_config: S3Config,
     pub validity_millis: Option<u64>,
 }
@@ -79,17 +81,29 @@ const VALIDITY_MILLIS: u64 = 10_000;
 /// Restart from `list_objects` when a listed lock key is deleted before `get_object` (e.g. winner cleanup).
 const TRY_BECOME_LEADER_MAX_LIST_GET_RACES: u32 = 64;
 
+/// S3 key prefix for lock files: `{leader_election_prefix}/lock/{namespace}/` when a prefix is set,
+/// otherwise `lock/{namespace}/`. The namespace is the topic-partition identifier.
+fn leader_lock_s3_prefix(leader_election_prefix: Option<&str>, namespace: &str) -> String {
+    let lock = LOCK_FILE_PREFIX.trim_end_matches('/');
+    let extra = leader_election_prefix
+        .map(str::trim)
+        .map(|p| p.trim_matches('/'))
+        .filter(|p| !p.is_empty());
+    match extra {
+        Some(ep) => format!("{}/{}/{}/", ep, lock, namespace),
+        None => format!("{}/{}/", lock, namespace),
+    }
+}
+
 impl LeaderElection {
     pub async fn new(config: LeaderElectionConfig) -> Self {
         let s3_client = s3::build_client(&config.s3_config).await;
-        let prefix = format!(
-            "{}/{}/",
-            LOCK_FILE_PREFIX.trim_end_matches("/"),
-            &config.namespace,
-        );
+        let prefix =
+            leader_lock_s3_prefix(config.leader_election_prefix.as_deref(), &config.namespace);
         tracing::debug!(
             node_id = config.node_id,
             namespace = %config.namespace,
+            leader_election_prefix = ?config.leader_election_prefix,
             "leader election initialized"
         );
         Self {
@@ -237,10 +251,6 @@ impl LeaderElection {
     }
 }
 
-pub fn leader_namespace(topic: &str, partition: u32) -> String {
-    format!("{topic}-{partition}")
-}
-
 #[derive(Debug)]
 pub struct CurrentLeader {
     pub node_id: u64,
@@ -253,8 +263,9 @@ pub async fn read_current_leader(
     s3_client: &aws_sdk_s3::Client,
     bucket: &str,
     namespace: &str,
+    leader_election_prefix: Option<&str>,
 ) -> Result<Option<CurrentLeader>> {
-    let prefix = format!("{}/{}/", LOCK_FILE_PREFIX.trim_end_matches("/"), namespace,);
+    let prefix = leader_lock_s3_prefix(leader_election_prefix, namespace);
     let contents = s3::list_objects(s3_client, bucket, &prefix).await?;
 
     let newest = match contents.last() {
@@ -342,6 +353,20 @@ mod tests {
         format!("{prefix}-{ts}-{n}")
     }
 
+    #[test]
+    fn leader_lock_s3_prefix_formatting() {
+        assert_eq!(leader_lock_s3_prefix(None, "topic-0"), "lock/topic-0/");
+        assert_eq!(
+            leader_lock_s3_prefix(Some("cluster-a"), "topic-0"),
+            "cluster-a/lock/topic-0/"
+        );
+        assert_eq!(
+            leader_lock_s3_prefix(Some("  staging/ "), "topic-0"),
+            "staging/lock/topic-0/"
+        );
+        assert_eq!(leader_lock_s3_prefix(Some(""), "topic-0"), "lock/topic-0/");
+    }
+
     #[tokio::test]
     async fn test_become_leader_empty_bucket() {
         require_localstack().await;
@@ -354,6 +379,7 @@ mod tests {
             node_id: 1,
             addr: "127.0.0.1:0".into(),
             namespace: "test-ns".into(),
+            leader_election_prefix: None,
             s3_config: config.clone(),
             validity_millis: Some(10_000),
         })
@@ -382,6 +408,7 @@ mod tests {
             node_id: 1,
             addr: "127.0.0.1:0".into(),
             namespace: ns.clone(),
+            leader_election_prefix: None,
             s3_config: config.clone(),
             validity_millis: None,
         })
@@ -393,6 +420,7 @@ mod tests {
             node_id: 2,
             addr: "127.0.0.1:0".into(),
             namespace: ns.clone(),
+            leader_election_prefix: None,
             s3_config: config.clone(),
             validity_millis: None,
         })
@@ -412,7 +440,7 @@ mod tests {
     }
 
     fn lock_prefix(namespace: &str) -> String {
-        format!("{}{}/", LOCK_FILE_PREFIX, namespace)
+        leader_lock_s3_prefix(None, namespace)
     }
 
     /// Unconditionally write a lock file to S3, bypassing the leader election
@@ -450,6 +478,7 @@ mod tests {
             node_id: 1,
             addr: "127.0.0.1:0".into(),
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -492,6 +521,7 @@ mod tests {
             node_id: 2,
             addr: "127.0.0.1:0".into(),
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -531,6 +561,7 @@ mod tests {
             node_id: 3,
             addr: "127.0.0.1:0".into(),
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -572,6 +603,7 @@ mod tests {
             node_id: 7,
             addr: "127.0.0.1:0".into(),
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -597,6 +629,7 @@ mod tests {
             node_id: 1,
             addr: "127.0.0.1:0".into(),
             namespace: ns.clone(),
+            leader_election_prefix: None,
             s3_config: config.clone(),
             validity_millis: None,
         })
@@ -620,6 +653,7 @@ mod tests {
             node_id: 2,
             addr: "127.0.0.1:0".into(),
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -665,6 +699,7 @@ mod tests {
             node_id: 1,
             addr: "127.0.0.1:0".into(),
             namespace: ns,
+            leader_election_prefix: None,
             s3_config: config,
             validity_millis: None,
         })
@@ -716,6 +751,7 @@ mod tests {
                     node_id: i as u64,
                     addr: "127.0.0.1:0".into(),
                     namespace: ns,
+                    leader_election_prefix: None,
                     s3_config: config,
                     validity_millis: None,
                 })
@@ -732,6 +768,46 @@ mod tests {
             }
         }
         assert_eq!(leaders, 1, "exactly one node should become leader");
+    }
+
+    #[tokio::test]
+    async fn test_election_prefix_isolates_same_namespace() {
+        require_localstack().await;
+        let bucket = unique_name("test-leader");
+        let ns = "shared-topic-partition";
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let le_a = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            addr: "127.0.0.1:0".into(),
+            namespace: ns.into(),
+            leader_election_prefix: Some("cluster-a".into()),
+            s3_config: config.clone(),
+            validity_millis: None,
+        })
+        .await;
+        let le_b = LeaderElection::new(LeaderElectionConfig {
+            node_id: 2,
+            addr: "127.0.0.1:0".into(),
+            namespace: ns.into(),
+            leader_election_prefix: Some("cluster-b".into()),
+            s3_config: config,
+            validity_millis: None,
+        })
+        .await;
+
+        let r_a = le_a.try_become_leader().await.unwrap();
+        let r_b = le_b.try_become_leader().await.unwrap();
+        assert!(
+            matches!(r_a, TryBecomeLeaderResult::Leader(_)),
+            "cluster-a should elect a leader: {r_a:?}"
+        );
+        assert!(
+            matches!(r_b, TryBecomeLeaderResult::Leader(_)),
+            "cluster-b should elect independently: {r_b:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -770,6 +846,7 @@ mod tests {
                     node_id: i as u64,
                     addr: "127.0.0.1:0".into(),
                     namespace: ns,
+                    leader_election_prefix: None,
                     s3_config: config,
                     validity_millis: None,
                 })
@@ -806,7 +883,7 @@ mod tests {
         let client = s3::build_client(&config).await;
         s3::ensure_bucket(&client, &bucket).await.unwrap();
 
-        let result = super::read_current_leader(&client, &bucket, &ns)
+        let result = super::read_current_leader(&client, &bucket, &ns, None)
             .await
             .unwrap();
         assert!(result.is_none(), "should be None when no lock files exist");
@@ -826,7 +903,7 @@ mod tests {
         )
         .await;
 
-        let leader = super::read_current_leader(&client, &bucket, &ns)
+        let leader = super::read_current_leader(&client, &bucket, &ns, None)
             .await
             .unwrap()
             .expect("should find leader");
@@ -848,7 +925,7 @@ mod tests {
         )
         .await;
 
-        let result = super::read_current_leader(&client, &bucket, &ns)
+        let result = super::read_current_leader(&client, &bucket, &ns, None)
             .await
             .unwrap();
         assert!(

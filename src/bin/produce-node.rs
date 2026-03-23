@@ -1,11 +1,47 @@
 use std::net::{IpAddr, SocketAddr};
 
-use barka::produce_node::{ProduceNode, ProduceNodeConfig, ProducerBatchLimits};
+use barka::produce_node::{ProduceNode, ProduceNodeConfig, ProducerBatchLimits, TopicConfig};
 use barka::producer;
 use barka::s3::{self, S3Config};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
+
+#[derive(Clone, Debug)]
+struct TopicConfigs(Vec<TopicConfig>);
+
+fn parse_topics(s: &str) -> Result<TopicConfigs, String> {
+    let mut out = Vec::new();
+    for entry in s.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (topic, count) = entry.rsplit_once(':').ok_or_else(|| {
+            format!("invalid topic spec '{entry}', expected TOPIC:NUM_PARTITIONS")
+        })?;
+        let partitions: u32 = count
+            .parse()
+            .map_err(|_| format!("invalid partition count '{count}' in '{entry}'"))?;
+        if partitions == 0 {
+            return Err(format!("partition count must be >= 1 in '{entry}'"));
+        }
+        out.push(TopicConfig {
+            topic: topic.to_string(),
+            partitions,
+        });
+    }
+    if out.is_empty() {
+        return Err("at least one topic must be specified".into());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for tc in &out {
+        if !seen.insert(&tc.topic) {
+            return Err(format!("duplicate topic '{}'", tc.topic));
+        }
+    }
+    Ok(TopicConfigs(out))
+}
 
 #[derive(Parser)]
 #[command(name = "produce-node", version, about = "Barka produce node")]
@@ -42,6 +78,14 @@ struct Cli {
 
     #[arg(long, env = "BARKA_LEADER_ELECTION_POLL_SECS", default_value_t = 3)]
     leader_election_poll_secs: u64,
+
+    /// Path segment in S3 before `lock/` and the topic-partition namespace (e.g. cluster or environment).
+    #[arg(long, env = "BARKA_LEADER_ELECTION_PREFIX")]
+    leader_election_prefix: Option<String>,
+
+    /// Topic configuration: TOPIC:NUM_PARTITIONS[,TOPIC:NUM_PARTITIONS,...]
+    #[arg(long, env = "BARKA_TOPICS", default_value = "default:1", value_parser = parse_topics)]
+    topics: TopicConfigs,
 }
 
 impl Cli {
@@ -70,6 +114,8 @@ impl Cli {
             s3_prefix: self.s3_prefix.clone(),
             producer_limits,
             leader_election_poll_secs: self.leader_election_poll_secs,
+            leader_election_prefix: self.leader_election_prefix.clone(),
+            topics: self.topics.0.clone(),
         }
     }
 
@@ -96,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         node_id = config.node_id,
         rpc_addr = %config.rpc_addr,
+        topics = ?config.topics,
         s3_endpoint = s3_config.endpoint_url.as_deref().unwrap_or("aws"),
         s3_bucket = %s3_config.bucket,
         "starting produce-node",

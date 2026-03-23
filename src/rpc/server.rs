@@ -1,27 +1,30 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use capnp_rpc::RpcSystem;
 use capnp_rpc::rpc_twoparty_capnp;
 use futures::AsyncReadExt;
+use lru::LruCache;
 use tokio::net::TcpListener;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info};
 
-use crate::consumer::PartitionConsumer;
-use crate::produce_node::LeadershipState;
-use crate::producer::PartitionProducer;
+use crate::consumer::{ConsumerConfig, PartitionConsumer};
+use crate::node::partition_data_prefix;
+use crate::produce_node::PartitionMap;
 use crate::rpc::barka_capnp::{consume_svc, produce_svc};
 use crate::rpc::bytes_transport::{BytesVatNetwork, MessageBytesQueue};
+use crate::s3::S3Config;
 
-pub async fn serve_produce_rpc(
-    producer: Arc<PartitionProducer>,
-    leadership: Arc<LeadershipState>,
-    addr: SocketAddr,
-) -> anyhow::Result<()> {
+const MAX_CACHED_CONSUMERS: usize = 256;
+
+type ConsumerCache = Rc<RefCell<LruCache<(String, u32), Arc<PartitionConsumer>>>>;
+
+pub async fn serve_produce_rpc(partitions: PartitionMap, addr: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "produce-rpc listening");
 
@@ -37,8 +40,7 @@ pub async fn serve_produce_rpc(
                     }
                 };
                 info!(%remote, "produce-rpc connection");
-                let producer = Arc::clone(&producer);
-                let leadership = Arc::clone(&leadership);
+                let partitions = Arc::clone(&partitions);
 
                 tokio::task::spawn_local(async move {
                     let stream = stream.compat();
@@ -50,11 +52,11 @@ pub async fn serve_produce_rpc(
                         futures::io::BufWriter::new(writer),
                         rpc_twoparty_capnp::Side::Server,
                         Default::default(),
-                        call_bytes_queue.clone(),
+                        Some(call_bytes_queue.clone()),
+                        None,
                     );
                     let per_conn = PerConnectionProduceNode {
-                        producer,
-                        leadership,
+                        partitions,
                         msg_bytes: call_bytes_queue,
                     };
                     let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
@@ -70,8 +72,7 @@ pub async fn serve_produce_rpc(
 }
 
 struct PerConnectionProduceNode {
-    producer: Arc<PartitionProducer>,
-    leadership: Arc<LeadershipState>,
+    partitions: PartitionMap,
     msg_bytes: MessageBytesQueue,
 }
 
@@ -87,13 +88,20 @@ impl produce_svc::Server for PerConnectionProduceNode {
             .pop_front()
             .ok_or_else(|| capnp::Error::failed("missing message bytes".into()))?;
         let req = params.get()?.get_request()?;
+        let key = (req.get_topic()?.to_string()?, req.get_partition());
 
-        let epoch = self
-            .leadership
-            .check_leader()
-            .ok_or_else(|| capnp::Error::failed("not leader for partition".into()))?;
+        let state = self.partitions.get(&key).ok_or_else(|| {
+            capnp::Error::failed(format!(
+                "partition {}/{} not configured on this node",
+                key.0, key.1
+            ))
+        })?;
 
-        let produced = self
+        let epoch = state.leadership.check_leader().ok_or_else(|| {
+            capnp::Error::failed(format!("not leader for partition {}/{}", key.0, key.1))
+        })?;
+
+        let produced = state
             .producer
             .apply_produce_request(raw, req, epoch)
             .await
@@ -111,11 +119,19 @@ impl produce_svc::Server for PerConnectionProduceNode {
 }
 
 pub async fn serve_consume_rpc(
-    consumer: Arc<PartitionConsumer>,
+    s3_config: S3Config,
+    base_prefix: String,
     addr: SocketAddr,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "consume-rpc listening");
+
+    let consumers: ConsumerCache = Rc::new(RefCell::new(LruCache::new(
+        NonZeroUsize::new(MAX_CACHED_CONSUMERS).unwrap(),
+    )));
+
+    let s3_config = Rc::new(s3_config);
+    let base_prefix = Rc::new(base_prefix);
 
     let local = tokio::task::LocalSet::new();
     local
@@ -129,7 +145,9 @@ pub async fn serve_consume_rpc(
                     }
                 };
                 info!(%remote, "consume-rpc connection");
-                let consumer = Arc::clone(&consumer);
+                let consumers = Rc::clone(&consumers);
+                let s3_config = Rc::clone(&s3_config);
+                let base_prefix = Rc::clone(&base_prefix);
 
                 tokio::task::spawn_local(async move {
                     let stream = stream.compat();
@@ -140,7 +158,11 @@ pub async fn serve_consume_rpc(
                         rpc_twoparty_capnp::Side::Server,
                         Default::default(),
                     );
-                    let per_conn = PerConnectionConsumeNode { consumer };
+                    let per_conn = PerConnectionConsumeNode {
+                        consumers,
+                        s3_config,
+                        base_prefix,
+                    };
                     let client: consume_svc::Client = capnp_rpc::new_client(per_conn);
                     let rpc = RpcSystem::new(Box::new(network), Some(client.client));
                     if let Err(e) = rpc.await {
@@ -154,7 +176,46 @@ pub async fn serve_consume_rpc(
 }
 
 struct PerConnectionConsumeNode {
-    consumer: Arc<PartitionConsumer>,
+    consumers: ConsumerCache,
+    s3_config: Rc<S3Config>,
+    base_prefix: Rc<String>,
+}
+
+impl PerConnectionConsumeNode {
+    async fn get_or_create_consumer(
+        &self,
+        topic: &str,
+        partition: u32,
+    ) -> Result<Arc<PartitionConsumer>, capnp::Error> {
+        let key = (topic.to_string(), partition);
+        {
+            let mut cache = self.consumers.borrow_mut();
+            if let Some(c) = cache.get(&key) {
+                return Ok(Arc::clone(c));
+            }
+        }
+        let prefix = partition_data_prefix(&self.base_prefix, topic, partition);
+        let cache_dir = std::env::temp_dir()
+            .join("barka-segment-cache")
+            .join(prefix.replace('/', "-"));
+        let consumer = PartitionConsumer::new(
+            &self.s3_config,
+            prefix,
+            ConsumerConfig {
+                cache_dir,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| capnp::Error::failed(e.to_string()))?;
+        // Re-check after await: another task may have inserted while we yielded.
+        let mut cache = self.consumers.borrow_mut();
+        if let Some(existing) = cache.get(&key) {
+            return Ok(Arc::clone(existing));
+        }
+        cache.put(key, Arc::clone(&consumer));
+        Ok(consumer)
+    }
 }
 
 impl consume_svc::Server for PerConnectionConsumeNode {
@@ -164,13 +225,14 @@ impl consume_svc::Server for PerConnectionConsumeNode {
         mut results: consume_svc::ConsumeResults,
     ) -> Result<(), capnp::Error> {
         let req = params.get()?.get_request()?;
-        let _topic = req.get_topic()?.to_string()?;
-        let _partition = req.get_partition();
+        let topic = req.get_topic()?.to_string()?;
+        let partition = req.get_partition();
         let offset = req.get_offset();
         let max = req.get_max_records();
 
-        let records = self
-            .consumer
+        let consumer = self.get_or_create_consumer(&topic, partition).await?;
+
+        let records = consumer
             .consume(offset, max)
             .await
             .map_err(|e| capnp::Error::failed(e.to_string()))?;
@@ -192,18 +254,17 @@ impl consume_svc::Server for PerConnectionConsumeNode {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::pin::pin;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::consumer::{ConsumerConfig, PartitionConsumer};
     use crate::log_offset::compose;
     use crate::node::segment_key_prefix;
-    use crate::produce_node::{LeadershipState, ProducerBatchLimits};
-    use crate::producer;
+    use crate::produce_node::{LeadershipState, PartitionProduceState, ProducerBatchLimits};
+    use crate::producer::{self, PartitionProducer};
     use crate::rpc::client::{ConsumeClient, ProduceClient};
-    use crate::s3::S3Config;
 
     fn test_s3_config(bucket: &str) -> S3Config {
         S3Config {
@@ -221,18 +282,22 @@ mod tests {
         format!("{label}/{nanos}")
     }
 
-    async fn make_produce_parts(
+    /// Build a single-topic partition map for test use.
+    /// Returns the map plus the leadership handle so tests can call `set_leader`.
+    async fn make_produce_partition_map(
         s3_config: &S3Config,
         s3_prefix: &str,
+        topic: &str,
+        partition: u32,
         limits: Option<ProducerBatchLimits>,
-    ) -> (Arc<PartitionProducer>, Arc<LeadershipState>) {
+    ) -> (PartitionMap, Arc<LeadershipState>) {
         let prefix = segment_key_prefix(Some(s3_prefix));
-        let partition_prefix = format!("{prefix}/test/0");
+        let pp = partition_data_prefix(&prefix, topic, partition);
         let leadership = Arc::new(LeadershipState::new());
         let producer = match limits {
             Some(l) => PartitionProducer::with_opts(
                 s3_config,
-                partition_prefix,
+                pp,
                 l.max_records,
                 l.max_bytes,
                 l.linger(),
@@ -240,29 +305,30 @@ mod tests {
             )
             .await
             .unwrap(),
-            None => PartitionProducer::new(s3_config, partition_prefix, Arc::clone(&leadership))
+            None => PartitionProducer::new(s3_config, pp, Arc::clone(&leadership))
                 .await
                 .unwrap(),
         };
-        (producer, leadership)
+        let mut map = HashMap::new();
+        map.insert(
+            (topic.to_string(), partition),
+            PartitionProduceState {
+                producer,
+                leadership: Arc::clone(&leadership),
+            },
+        );
+        (Arc::new(map), leadership)
     }
 
-    async fn make_consume_parts(s3_config: &S3Config, s3_prefix: &str) -> Arc<PartitionConsumer> {
-        let prefix = segment_key_prefix(Some(s3_prefix));
-        let partition_prefix = format!("{prefix}/test/0");
-        let cache_dir = std::env::temp_dir()
-            .join("barka-segment-cache")
-            .join(partition_prefix.replace('/', "-"));
-        PartitionConsumer::new(
-            s3_config,
-            partition_prefix,
-            ConsumerConfig {
-                cache_dir,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap()
+    fn make_consume_node(s3_config: &S3Config, s3_prefix: &str) -> PerConnectionConsumeNode {
+        let base_prefix = segment_key_prefix(Some(s3_prefix));
+        PerConnectionConsumeNode {
+            consumers: Rc::new(RefCell::new(LruCache::new(
+                NonZeroUsize::new(MAX_CACHED_CONSUMERS).unwrap(),
+            ))),
+            s3_config: Rc::new(s3_config.clone()),
+            base_prefix: Rc::new(base_prefix),
+        }
     }
 
     static STRESS_BUCKET_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -281,9 +347,11 @@ mod tests {
             .unwrap();
 
         let s3_prefix = unique_prefix("rpc-round-trip");
-        let (producer, leadership) = make_produce_parts(
+        let (partitions, leadership) = make_produce_partition_map(
             &s3_config,
             &s3_prefix,
+            "test-topic",
+            0,
             Some(ProducerBatchLimits {
                 max_records: 2,
                 max_bytes: 1024 * 1024,
@@ -292,10 +360,8 @@ mod tests {
         )
         .await;
         leadership.set_leader(u64::MAX, 0);
-        let consumer = make_consume_parts(&s3_config, &s3_prefix).await;
 
-        let p = Arc::clone(&producer);
-        let l = Arc::clone(&leadership);
+        let pm = Arc::clone(&partitions);
         let produce_server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -315,11 +381,11 @@ mod tests {
                             futures::io::BufWriter::new(writer),
                             rpc_twoparty_capnp::Side::Server,
                             Default::default(),
-                            call_bytes_queue.clone(),
+                            Some(call_bytes_queue.clone()),
+                            None,
                         );
                         let per_conn = PerConnectionProduceNode {
-                            producer: p,
-                            leadership: l,
+                            partitions: pm,
                             msg_bytes: call_bytes_queue,
                         };
                         let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
@@ -330,7 +396,8 @@ mod tests {
             });
         });
 
-        let c = Arc::clone(&consumer);
+        let cs3 = s3_config.clone();
+        let cpfx = s3_prefix.clone();
         let consume_server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -349,7 +416,7 @@ mod tests {
                             rpc_twoparty_capnp::Side::Server,
                             Default::default(),
                         );
-                        let per_conn = PerConnectionConsumeNode { consumer: c };
+                        let per_conn = make_consume_node(&cs3, &cpfx);
                         let client: consume_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));
                         rpc.await.unwrap();
@@ -368,7 +435,8 @@ mod tests {
                 local
                     .run_until(async {
                         let produce_client = ProduceClient::connect(produce_addr).await.unwrap();
-                        let consume_client = ConsumeClient::connect(consume_addr).await.unwrap();
+                        let mut consume_client =
+                            ConsumeClient::connect(consume_addr).await.unwrap();
 
                         let recs = produce_client
                             .produce("test-topic", 0, vec![b"hello".to_vec(), b"world".to_vec()])
@@ -397,11 +465,11 @@ mod tests {
                             3,
                             "should get all 3 records across both segments"
                         );
-                        assert_eq!(consumed[0].value, b"hello");
+                        assert_eq!(consumed[0].value.as_ref(), b"hello");
                         assert_eq!(consumed[0].offset, compose(0, 0));
-                        assert_eq!(consumed[1].value, b"world");
+                        assert_eq!(consumed[1].value.as_ref(), b"world");
                         assert_eq!(consumed[1].offset, compose(0, 1));
-                        assert_eq!(consumed[2].value, b"third");
+                        assert_eq!(consumed[2].value.as_ref(), b"third");
                         assert_eq!(consumed[2].offset, compose(1, 0));
 
                         let consumed2 = consume_client
@@ -409,15 +477,15 @@ mod tests {
                             .await
                             .unwrap();
                         assert_eq!(consumed2.len(), 2, "should skip first record");
-                        assert_eq!(consumed2[0].value, b"world");
-                        assert_eq!(consumed2[1].value, b"third");
+                        assert_eq!(consumed2[0].value.as_ref(), b"world");
+                        assert_eq!(consumed2[1].value.as_ref(), b"third");
 
                         let consumed3 = consume_client
                             .consume("test-topic", 0, compose(1, 0), 10)
                             .await
                             .unwrap();
                         assert_eq!(consumed3.len(), 1);
-                        assert_eq!(consumed3[0].value, b"third");
+                        assert_eq!(consumed3[0].value.as_ref(), b"third");
 
                         let consumed4 = consume_client
                             .consume("test-topic", 0, compose(2, 0), 10)
@@ -449,12 +517,17 @@ mod tests {
             .await
             .unwrap();
 
-        let (producer, leadership) =
-            make_produce_parts(&s3_config, &unique_prefix("rpc-default-limits"), None).await;
+        let (partitions, leadership) = make_produce_partition_map(
+            &s3_config,
+            &unique_prefix("rpc-default-limits"),
+            "default-limits-topic",
+            0,
+            None,
+        )
+        .await;
         leadership.set_leader(u64::MAX, 0);
 
-        let p = Arc::clone(&producer);
-        let l = Arc::clone(&leadership);
+        let pm = Arc::clone(&partitions);
         let server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -474,11 +547,11 @@ mod tests {
                             futures::io::BufWriter::new(writer),
                             rpc_twoparty_capnp::Side::Server,
                             Default::default(),
-                            call_bytes_queue.clone(),
+                            Some(call_bytes_queue.clone()),
+                            None,
                         );
                         let per_conn = PerConnectionProduceNode {
-                            producer: p,
-                            leadership: l,
+                            partitions: pm,
                             msg_bytes: call_bytes_queue,
                         };
                         let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
@@ -526,6 +599,7 @@ mod tests {
         const RUN_SECS: u64 = 4;
         const BATCH: usize = 40;
         const MIN_TOTAL_RECORDS: u64 = 400;
+        const TOPIC: &str = "stress-topic";
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -541,9 +615,11 @@ mod tests {
             .await
             .unwrap();
 
-        let (producer, leadership) = make_produce_parts(
+        let (partitions, leadership) = make_produce_partition_map(
             &s3_config,
             &unique_prefix(&format!("rpc-stress/{bucket}")),
+            TOPIC,
+            0,
             Some(ProducerBatchLimits {
                 max_records: 100,
                 max_bytes: 1024 * 1024,
@@ -553,8 +629,7 @@ mod tests {
         .await;
         leadership.set_leader(u64::MAX, 0);
 
-        let p = Arc::clone(&producer);
-        let l = Arc::clone(&leadership);
+        let pm = Arc::clone(&partitions);
         let server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -583,11 +658,11 @@ mod tests {
                                         futures::io::BufWriter::new(writer),
                                         rpc_twoparty_capnp::Side::Server,
                                         Default::default(),
-                                        call_bytes_queue.clone(),
+                                        Some(call_bytes_queue.clone()),
+                                        None,
                                     );
                                     let per_conn = PerConnectionProduceNode {
-                                        producer: Arc::clone(&p),
-                                        leadership: Arc::clone(&l),
+                                        partitions: Arc::clone(&pm),
                                         msg_bytes: call_bytes_queue,
                                     };
                                     let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
@@ -617,7 +692,6 @@ mod tests {
                     local
                         .run_until(async {
                             let client = ProduceClient::connect(addr).await.unwrap();
-                            let topic = format!("load-stress-{client_id}");
                             let deadline = Instant::now() + Duration::from_secs(RUN_SECS);
                             let mut produce_count: u64 = 0;
                             let mut prev_first_offset: Option<u64> = None;
@@ -629,7 +703,7 @@ mod tests {
                                             .into_bytes()
                                     })
                                     .collect();
-                                let recs = client.produce(&topic, 0, batch).await.unwrap();
+                                let recs = client.produce(TOPIC, 0, batch).await.unwrap();
                                 assert_eq!(recs.len(), BATCH);
                                 let first_offset = recs[0].offset;
                                 if let Some(prev) = prev_first_offset {
@@ -677,13 +751,17 @@ mod tests {
             .await
             .unwrap();
 
-        let (producer, _leadership) =
-            make_produce_parts(&s3_config, &unique_prefix("rpc-not-leader"), None).await;
+        let (partitions, _leadership) = make_produce_partition_map(
+            &s3_config,
+            &unique_prefix("rpc-not-leader"),
+            "test-topic",
+            0,
+            None,
+        )
+        .await;
         // Deliberately NOT calling set_leader — node should reject produce.
-        let leadership = Arc::new(LeadershipState::new());
 
-        let p = Arc::clone(&producer);
-        let l = Arc::clone(&leadership);
+        let pm = Arc::clone(&partitions);
         let server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -703,11 +781,11 @@ mod tests {
                             futures::io::BufWriter::new(writer),
                             rpc_twoparty_capnp::Side::Server,
                             Default::default(),
-                            call_bytes_queue.clone(),
+                            Some(call_bytes_queue.clone()),
+                            None,
                         );
                         let per_conn = PerConnectionProduceNode {
-                            producer: p,
-                            leadership: l,
+                            partitions: pm,
                             msg_bytes: call_bytes_queue,
                         };
                         let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
