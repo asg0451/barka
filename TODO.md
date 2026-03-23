@@ -1,0 +1,5 @@
+- [ ] separate producer nodes from consumer nodes entirely
+- [ ] propagate cluster info via gossip
+- [ ] store and propagate leader node id+addr via gossip
+- [ ] client produce requests route to leader
+- [ ] client consume requests load balance with stickiness on cached data
