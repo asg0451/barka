@@ -249,23 +249,23 @@ pub async fn run_once(
             leaderless: Vec::new(),
         });
     }
-    tracing::info!(partition_count = entries.len(), "snapshotting leadership");
+    tracing::debug!(partition_count = entries.len(), "snapshotting leadership");
 
     let snapshot = snapshot_leadership(s3_client, bucket, &entries, leader_election_prefix).await?;
 
     let plan = compute_plan(&snapshot, max_abdications_per_node);
 
-    tracing::info!(
-        node_count = plan.node_count,
-        leaderless = plan.leaderless.len(),
-        abdications = plan.abdications.len(),
-        distribution = ?plan.distribution,
-        "computed rebalance plan"
-    );
-
     if plan.abdications.is_empty() {
-        tracing::info!("cluster is balanced, nothing to do");
+        tracing::debug!("cluster is balanced, nothing to do");
     } else {
+        tracing::debug!(
+            node_count = plan.node_count,
+            leaderless = plan.leaderless.len(),
+            abdications = plan.abdications.len(),
+            distribution = ?plan.distribution,
+            "computed rebalance plan"
+        );
+
         let result = execute_plan(&plan, settle_delay, dry_run).await?;
         tracing::info!(
             succeeded = result.succeeded,
