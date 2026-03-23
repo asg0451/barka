@@ -47,3 +47,7 @@ Always use `jq` instead of ad hoc python scripts for parsing JSON in shell comma
 ## Don't reuse field names with different semantics
 
 When adding a field to a response struct that means something different from an existing field (e.g., `offset` for produce base offset vs. consume cursor), give it a distinct name (`next_offset`). Don't reuse-and-comment — rename.
+
+## Don't chain shell commands with &&
+
+The permission system flags `&&` as "ambiguous syntax with command separators," forcing manual approval even when each individual command is allowed. Use separate Bash tool calls instead of chaining with `&&`.

@@ -74,6 +74,9 @@
       "Bash(act --json)",
       "Bash(cargo run:*)",
       "Bash(act push:*)"
+    ],
+    "additionalDirectories": [
+      "~/.claude/projects/-Users-miles-proj-barka/tool-results"
     ]
   }
 }

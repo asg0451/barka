@@ -92,4 +92,5 @@ capnp-rpc is `!Send`, so RPC servers run on dedicated threads with single-thread
 - **Never rebase** — Always use merge commits. Do not use `git rebase` under any circumstances.
 - **Use jq for JSON** — Always use `jq` instead of ad hoc python scripts for parsing JSON in shell commands.
 - **No command substitution in Bash** — Avoid `$(...)` and backtick substitution in shell commands; these require manual approval. Use pipes or separate commands instead.
+- **No `&&` chaining in Bash** — The permission system flags `&&` as ambiguous syntax, forcing manual approval. Use separate Bash tool calls instead.
 
