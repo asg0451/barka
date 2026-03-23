@@ -13,6 +13,21 @@ use crate::rpc::barka_capnp::{consume_svc, produce_svc};
 use crate::rpc::bytes_transport::{BytesVatNetwork, MessageBytesQueue};
 use crate::segment::RecordData;
 
+/// Zero-copy `slice_ref` with fallback: if `subset` doesn't point into `buf`
+/// (e.g. capnp-rpc copied the response), fall back to a memcpy instead of
+/// panicking.
+fn slice_ref_or_copy(buf: &Bytes, subset: &[u8]) -> Bytes {
+    let buf_start = buf.as_ptr() as usize;
+    let buf_end = buf_start + buf.len();
+    let sub_start = subset.as_ptr() as usize;
+    let sub_end = sub_start + subset.len();
+    if sub_start >= buf_start && sub_end <= buf_end {
+        buf.slice_ref(subset)
+    } else {
+        Bytes::copy_from_slice(subset)
+    }
+}
+
 /// Cap'n Proto RPC client for produce operations. Must be used within a tokio LocalSet.
 pub struct ProduceClient {
     client: produce_svc::Client,
@@ -158,12 +173,12 @@ impl ConsumeClient {
                 key: if key_slice.is_empty() {
                     Bytes::new()
                 } else {
-                    raw.slice_ref(key_slice)
+                    slice_ref_or_copy(&raw, key_slice)
                 },
                 value: if value_slice.is_empty() {
                     Bytes::new()
                 } else {
-                    raw.slice_ref(value_slice)
+                    slice_ref_or_copy(&raw, value_slice)
                 },
             });
         }
