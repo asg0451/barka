@@ -235,7 +235,11 @@ mod tests {
                             .consume("test-topic", 0, compose(0, 0), 10)
                             .await
                             .unwrap();
-                        assert_eq!(consumed.len(), 3, "should get all 3 records across both segments");
+                        assert_eq!(
+                            consumed.len(),
+                            3,
+                            "should get all 3 records across both segments"
+                        );
                         assert_eq!(consumed[0].value, b"hello");
                         assert_eq!(consumed[0].offset, compose(0, 0));
                         assert_eq!(consumed[1].value, b"world");

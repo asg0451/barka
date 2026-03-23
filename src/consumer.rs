@@ -155,7 +155,8 @@ impl PartitionConsumer {
                 reply: tx,
             })
             .map_err(|_| anyhow::anyhow!("consumer I/O thread gone"))?;
-        rx.await.map_err(|_| anyhow::anyhow!("consumer I/O thread dropped reply"))?
+        rx.await
+            .map_err(|_| anyhow::anyhow!("consumer I/O thread dropped reply"))?
     }
 
     /// Fire-and-forget prefetch: send the request but drop the reply channel.
@@ -321,16 +322,14 @@ mod tests {
             mem_cache_max_segments: 4,
             disk_cache_max_segments: 2,
             disk_threshold_bytes: 1024 * 1024,
-            cache_dir: std::env::temp_dir()
-                .join("barka-test-cache")
-                .join(format!(
-                    "{}-{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos(),
-                    TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
-                )),
+            cache_dir: std::env::temp_dir().join("barka-test-cache").join(format!(
+                "{}-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
+            )),
         }
     }
 
@@ -434,14 +433,8 @@ mod tests {
         // Consume starting from segment 0, requesting all 6 records
         let records = consumer.consume(compose(0, 0), 10).await.unwrap();
         assert_eq!(records.len(), 6);
-        assert_eq!(
-            std::str::from_utf8(&records[0].value).unwrap(),
-            "seg0-0"
-        );
-        assert_eq!(
-            std::str::from_utf8(&records[3].value).unwrap(),
-            "seg1-0"
-        );
+        assert_eq!(std::str::from_utf8(&records[0].value).unwrap(), "seg0-0");
+        assert_eq!(std::str::from_utf8(&records[3].value).unwrap(), "seg1-0");
     }
 
     #[tokio::test]
@@ -459,14 +452,8 @@ mod tests {
         // Start from intra=1, should get records 1 and 2
         let records = consumer.consume(compose(0, 1), 10).await.unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(
-            std::str::from_utf8(&records[0].value).unwrap(),
-            "val-1"
-        );
-        assert_eq!(
-            std::str::from_utf8(&records[1].value).unwrap(),
-            "val-2"
-        );
+        assert_eq!(std::str::from_utf8(&records[0].value).unwrap(), "val-1");
+        assert_eq!(std::str::from_utf8(&records[1].value).unwrap(), "val-2");
     }
 
     #[tokio::test]
@@ -487,18 +474,9 @@ mod tests {
         // Start from last record of segment 0, read 3 records → should cross into segment 1
         let records = consumer.consume(compose(0, 2), 3).await.unwrap();
         assert_eq!(records.len(), 3);
-        assert_eq!(
-            std::str::from_utf8(&records[0].value).unwrap(),
-            "seg0-2"
-        );
-        assert_eq!(
-            std::str::from_utf8(&records[1].value).unwrap(),
-            "seg1-0"
-        );
-        assert_eq!(
-            std::str::from_utf8(&records[2].value).unwrap(),
-            "seg1-1"
-        );
+        assert_eq!(std::str::from_utf8(&records[0].value).unwrap(), "seg0-2");
+        assert_eq!(std::str::from_utf8(&records[1].value).unwrap(), "seg1-0");
+        assert_eq!(std::str::from_utf8(&records[2].value).unwrap(), "seg1-1");
     }
 
     #[tokio::test]
