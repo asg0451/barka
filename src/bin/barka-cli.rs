@@ -112,7 +112,7 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
 
-                let client = ConsumeClient::connect(cli.consume_addr)
+                let mut client = ConsumeClient::connect(cli.consume_addr)
                     .await
                     .with_context(|| format!("connect {}", cli.consume_addr))?;
                 let records = client

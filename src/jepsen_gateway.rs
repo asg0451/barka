@@ -62,12 +62,12 @@ async fn run_session(
     consume_rpc_addr: SocketAddr,
 ) -> anyhow::Result<()> {
     let produce_client = connect_produce_with_retry(produce_rpc_addr).await?;
-    let consume_client = connect_consume_with_retry(consume_rpc_addr).await?;
+    let mut consume_client = connect_consume_with_retry(consume_rpc_addr).await?;
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        let response = handle_json_line(&produce_client, &consume_client, &line).await;
+        let response = handle_json_line(&produce_client, &mut consume_client, &line).await;
         let mut out = serde_json::to_string(&response).unwrap();
         out.push('\n');
         if writer.write_all(out.as_bytes()).await.is_err() {
@@ -166,7 +166,7 @@ fn is_transient_produce_error(msg: &str) -> bool {
 
 async fn handle_json_line(
     produce_client: &ProduceClient,
-    consume_client: &ConsumeClient,
+    consume_client: &mut ConsumeClient,
     line: &str,
 ) -> JsonlResponse {
     let req: JsonlRequest = match serde_json::from_str(line) {

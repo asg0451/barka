@@ -50,7 +50,8 @@ pub async fn serve_produce_rpc(
                         futures::io::BufWriter::new(writer),
                         rpc_twoparty_capnp::Side::Server,
                         Default::default(),
-                        call_bytes_queue.clone(),
+                        Some(call_bytes_queue.clone()),
+                        None,
                     );
                     let per_conn = PerConnectionProduceNode {
                         producer,
@@ -315,7 +316,8 @@ mod tests {
                             futures::io::BufWriter::new(writer),
                             rpc_twoparty_capnp::Side::Server,
                             Default::default(),
-                            call_bytes_queue.clone(),
+                            Some(call_bytes_queue.clone()),
+                            None,
                         );
                         let per_conn = PerConnectionProduceNode {
                             producer: p,
@@ -368,7 +370,8 @@ mod tests {
                 local
                     .run_until(async {
                         let produce_client = ProduceClient::connect(produce_addr).await.unwrap();
-                        let consume_client = ConsumeClient::connect(consume_addr).await.unwrap();
+                        let mut consume_client =
+                            ConsumeClient::connect(consume_addr).await.unwrap();
 
                         let recs = produce_client
                             .produce("test-topic", 0, vec![b"hello".to_vec(), b"world".to_vec()])
@@ -397,11 +400,11 @@ mod tests {
                             3,
                             "should get all 3 records across both segments"
                         );
-                        assert_eq!(consumed[0].value, b"hello");
+                        assert_eq!(consumed[0].value.as_ref(), b"hello");
                         assert_eq!(consumed[0].offset, compose(0, 0));
-                        assert_eq!(consumed[1].value, b"world");
+                        assert_eq!(consumed[1].value.as_ref(), b"world");
                         assert_eq!(consumed[1].offset, compose(0, 1));
-                        assert_eq!(consumed[2].value, b"third");
+                        assert_eq!(consumed[2].value.as_ref(), b"third");
                         assert_eq!(consumed[2].offset, compose(1, 0));
 
                         let consumed2 = consume_client
@@ -409,15 +412,15 @@ mod tests {
                             .await
                             .unwrap();
                         assert_eq!(consumed2.len(), 2, "should skip first record");
-                        assert_eq!(consumed2[0].value, b"world");
-                        assert_eq!(consumed2[1].value, b"third");
+                        assert_eq!(consumed2[0].value.as_ref(), b"world");
+                        assert_eq!(consumed2[1].value.as_ref(), b"third");
 
                         let consumed3 = consume_client
                             .consume("test-topic", 0, compose(1, 0), 10)
                             .await
                             .unwrap();
                         assert_eq!(consumed3.len(), 1);
-                        assert_eq!(consumed3[0].value, b"third");
+                        assert_eq!(consumed3[0].value.as_ref(), b"third");
 
                         let consumed4 = consume_client
                             .consume("test-topic", 0, compose(2, 0), 10)
@@ -474,7 +477,8 @@ mod tests {
                             futures::io::BufWriter::new(writer),
                             rpc_twoparty_capnp::Side::Server,
                             Default::default(),
-                            call_bytes_queue.clone(),
+                            Some(call_bytes_queue.clone()),
+                            None,
                         );
                         let per_conn = PerConnectionProduceNode {
                             producer: p,
@@ -583,7 +587,8 @@ mod tests {
                                         futures::io::BufWriter::new(writer),
                                         rpc_twoparty_capnp::Side::Server,
                                         Default::default(),
-                                        call_bytes_queue.clone(),
+                                        Some(call_bytes_queue.clone()),
+                                        None,
                                     );
                                     let per_conn = PerConnectionProduceNode {
                                         producer: Arc::clone(&p),
@@ -703,7 +708,8 @@ mod tests {
                             futures::io::BufWriter::new(writer),
                             rpc_twoparty_capnp::Side::Server,
                             Default::default(),
-                            call_bytes_queue.clone(),
+                            Some(call_bytes_queue.clone()),
+                            None,
                         );
                         let per_conn = PerConnectionProduceNode {
                             producer: p,

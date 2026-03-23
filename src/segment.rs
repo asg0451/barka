@@ -14,9 +14,10 @@
 //! ```
 
 use bytes::Bytes;
+use serde::Serialize;
 
 /// Data for a single record, with zero-copy key/value slices.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct RecordData {
     pub offset: u64,
     pub timestamp: i64,
@@ -63,7 +64,10 @@ pub fn encode_gather(epoch: u64, records: &[RecordData]) -> (Vec<Bytes>, u64) {
 }
 
 /// Decode a segment from contiguous bytes (for consumers / tests).
-pub fn decode(data: &[u8]) -> anyhow::Result<(u64, Vec<RecordData>)> {
+///
+/// Key/value fields are zero-copy `Bytes::slice` views into `data`, so the
+/// caller's buffer stays alive (via refcount) as long as any `RecordData` does.
+pub fn decode(data: Bytes) -> anyhow::Result<(u64, Vec<RecordData>)> {
     anyhow::ensure!(data.len() >= HEADER_BYTES, "segment too short for header");
 
     let epoch = u64::from_le_bytes(data[0..8].try_into()?);
@@ -90,9 +94,9 @@ pub fn decode(data: &[u8]) -> anyhow::Result<(u64, Vec<RecordData>)> {
             "segment too short for record data"
         );
 
-        let key = Bytes::copy_from_slice(&data[cursor..cursor + key_len]);
+        let key = data.slice(cursor..cursor + key_len);
         cursor += key_len;
-        let value = Bytes::copy_from_slice(&data[cursor..cursor + value_len]);
+        let value = data.slice(cursor..cursor + value_len);
         cursor += value_len;
 
         records.push(RecordData {
@@ -115,7 +119,7 @@ mod tests {
         let (chunks, len) = encode_gather(42, &[]);
         let buf: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
         assert_eq!(buf.len() as u64, len);
-        let (epoch, records) = decode(&buf).unwrap();
+        let (epoch, records) = decode(buf.into()).unwrap();
         assert_eq!(epoch, 42);
         assert!(records.is_empty());
     }
@@ -141,7 +145,7 @@ mod tests {
         let buf: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
         assert_eq!(buf.len() as u64, len);
 
-        let (epoch, decoded) = decode(&buf).unwrap();
+        let (epoch, decoded) = decode(buf.into()).unwrap();
         assert_eq!(epoch, 7);
         assert_eq!(decoded.len(), 2);
 
