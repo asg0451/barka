@@ -47,3 +47,7 @@ Always use `jq` instead of ad hoc python scripts for parsing JSON in shell comma
 ## Don't reuse field names with different semantics
 
 When adding a field to a response struct that means something different from an existing field (e.g., `offset` for produce base offset vs. consume cursor), give it a distinct name (`next_offset`). Don't reuse-and-comment — rename.
+
+## No variable substitution in Bash at all
+
+Not just `$(...)` — even `VAR=x && cmd "$VAR"` triggers manual approval in Claude Code. Use separate sequential commands or hardcode values directly. For example, instead of `PR=25 && gh pr comment "$PR"`, just write `gh pr comment 25`.
