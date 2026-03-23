@@ -202,7 +202,7 @@ impl LeaderElection {
             .await?
             {
                 PutOutcome::Created => {
-                    tracing::info!(epoch = epoch.0, "became leader");
+                    tracing::info!(epoch = epoch.0, prefix = %self.prefix, "became leader");
                     // clean up old lock files
                     if !old_keys.is_empty() {
                         let client = self.s3_client.clone();

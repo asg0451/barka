@@ -108,23 +108,23 @@ impl LeadershipState {
         }
     }
 
-    pub fn set_leader(&self, valid_until_ms: u64, epoch: u64) {
+    /// Returns `true` if this call transitioned from not-leader to leader.
+    pub fn set_leader(&self, valid_until_ms: u64, epoch: u64) -> bool {
         let mut inner = self.inner.write().unwrap();
-        if !inner.is_leader {
-            tracing::info!(epoch, valid_until_ms, "acquired leadership");
-        }
+        let was_follower = !inner.is_leader;
         inner.is_leader = true;
         inner.valid_until_ms = valid_until_ms;
         inner.epoch = epoch;
+        was_follower
     }
 
-    pub fn set_not_leader(&self) {
+    /// Returns the epoch we lost if this call transitioned from leader to not-leader.
+    pub fn set_not_leader(&self) -> Option<u64> {
         let mut inner = self.inner.write().unwrap();
-        if inner.is_leader {
-            tracing::info!(epoch = inner.epoch, "lost leadership");
-        }
+        let lost_epoch = inner.is_leader.then_some(inner.epoch);
         inner.is_leader = false;
         inner.valid_until_ms = 0;
+        lost_epoch
     }
 }
 
@@ -266,22 +266,28 @@ async fn run_leader_loop(
                 if prev_epoch.is_some_and(|e| e != epoch) {
                     producer.cancel_pending();
                 }
-                state.set_leader(info.valid_until_ms, epoch);
+                if state.set_leader(info.valid_until_ms, epoch) {
+                    tracing::info!(epoch, valid_until_ms = info.valid_until_ms, prefix = %span_prefix, "acquired leadership");
+                }
                 prev_epoch = Some(epoch);
             }
             Ok(TryBecomeLeaderResult::NotLeader) => {
                 if prev_epoch.is_some() {
                     producer.cancel_pending();
                 }
-                state.set_not_leader();
+                if let Some(epoch) = state.set_not_leader() {
+                    tracing::info!(epoch, prefix = %span_prefix, "lost leadership");
+                }
                 prev_epoch = None;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "leader election error");
+                tracing::warn!(error = %e, prefix = %span_prefix, "leader election error");
                 if prev_epoch.is_some() {
                     producer.cancel_pending();
                 }
-                state.set_not_leader();
+                if let Some(epoch) = state.set_not_leader() {
+                    tracing::info!(epoch, prefix = %span_prefix, "lost leadership");
+                }
                 prev_epoch = None;
             }
         }
