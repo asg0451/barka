@@ -41,6 +41,7 @@ pub struct Abdication {
 #[derive(Debug)]
 pub struct RebalanceResult {
     pub succeeded: usize,
+    pub skipped: usize,
     pub failed: usize,
 }
 
@@ -146,12 +147,15 @@ pub fn compute_plan(
     }
 }
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub async fn execute_plan(
     plan: &RebalancePlan,
     settle_delay: Duration,
     dry_run: bool,
 ) -> Result<RebalanceResult> {
     let mut succeeded = 0;
+    let mut skipped = 0;
     let mut failed = 0;
 
     for (i, abd) in plan.abdications.iter().enumerate() {
@@ -171,8 +175,11 @@ pub async fn execute_plan(
             "sending abdicate request"
         );
 
-        match ProduceClient::connect(abd.addr).await {
-            Ok(client) => match client.abdicate(&abd.topic, abd.partition).await {
+        let connect_result =
+            tokio::time::timeout(CONNECT_TIMEOUT, ProduceClient::connect(abd.addr)).await;
+
+        match connect_result {
+            Ok(Ok(client)) => match client.abdicate(&abd.topic, abd.partition).await {
                 Ok(true) => {
                     tracing::info!(
                         topic = %abd.topic, partition = abd.partition,
@@ -181,11 +188,11 @@ pub async fn execute_plan(
                     succeeded += 1;
                 }
                 Ok(false) => {
-                    tracing::warn!(
+                    tracing::info!(
                         topic = %abd.topic, partition = abd.partition,
-                        "abdication returned false (partition not found on node)"
+                        "partition no longer on node (leadership moved), skipping"
                     );
-                    failed += 1;
+                    skipped += 1;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -195,10 +202,17 @@ pub async fn execute_plan(
                     failed += 1;
                 }
             },
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     addr = %abd.addr, error = %e,
                     "failed to connect to produce-node"
+                );
+                failed += 1;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    addr = %abd.addr,
+                    "connect to produce-node timed out"
                 );
                 failed += 1;
             }
@@ -209,7 +223,11 @@ pub async fn execute_plan(
         }
     }
 
-    Ok(RebalanceResult { succeeded, failed })
+    Ok(RebalanceResult {
+        succeeded,
+        skipped,
+        failed,
+    })
 }
 
 pub async fn run_once(
@@ -251,6 +269,7 @@ pub async fn run_once(
         let result = execute_plan(&plan, settle_delay, dry_run).await?;
         tracing::info!(
             succeeded = result.succeeded,
+            skipped = result.skipped,
             failed = result.failed,
             "rebalance cycle complete"
         );
