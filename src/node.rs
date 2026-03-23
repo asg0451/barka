@@ -18,6 +18,18 @@ pub fn segment_key_prefix(optional_leading: Option<&str>) -> String {
     }
 }
 
+/// S3 key prefix for a specific topic-partition's segment objects.
+///
+/// Returns `{base}/{topic}/{partition}`, e.g. `myenv/data/events/3`.
+pub fn partition_data_prefix(base: &str, topic: &str, partition: u32) -> String {
+    format!("{base}/{topic}/{partition}")
+}
+
+/// Leader election namespace for a topic-partition, used as the S3 lock prefix.
+pub fn leader_namespace(topic: &str, partition: u32) -> String {
+    format!("{topic}/{partition}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -40,5 +52,18 @@ mod tests {
     #[test]
     fn segment_key_prefix_empty_string() {
         assert_eq!(segment_key_prefix(Some("")), "data");
+    }
+
+    #[test]
+    fn partition_data_prefix_basic() {
+        assert_eq!(
+            partition_data_prefix("pfx/data", "events", 3),
+            "pfx/data/events/3"
+        );
+    }
+
+    #[test]
+    fn leader_namespace_basic() {
+        assert_eq!(leader_namespace("events", 3), "events/3");
     }
 }

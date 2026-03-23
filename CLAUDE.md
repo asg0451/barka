@@ -89,3 +89,4 @@ capnp-rpc is `!Send`, so RPC servers run on dedicated threads with single-thread
 
 - **Simplicity first** — Make each change as small and direct as possible; touch only what the task requires.
 - **No laziness** — Find root causes; avoid temporary or cosmetic fixes. Hold work to senior-engineer standards.
+- **Never rebase** — Always use merge commits. Do not use `git rebase` under any circumstances.

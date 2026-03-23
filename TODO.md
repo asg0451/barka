@@ -1,5 +1,8 @@
-- [ ] separate producer nodes from consumer nodes entirely
+- [X] separate producer nodes from consumer nodes entirely
 - [X] add cli arg for leader election prefix as well. should go before the namespace. (namespace = topic-partition)
+- [ ] implement a mechanism for a leader to retain its control most of the time. possibly by bumping the epoch and re-claiming it early?
 - [ ] try and make consume as zero copy as possible, like produce
-- [ ] add support for multiple topics and partitions
+- [X] add support for multiple topics and partitions
+- [ ] add support for on the fly topic/partition creation
 - [ ] make a more sophisticated client which can examing topic-partition leadership state to route produce requests to the appropriate node, taking expiry and retries into account.
+- [ ] add a service that examines topic-partition leadership state and forces rebalances if the load is uneven
