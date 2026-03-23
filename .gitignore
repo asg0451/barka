@@ -1,4 +1,5 @@
 /target
+.claude/worktrees/
 jepsen/barka/store/
 jepsen/barka/target/
 jepsen/barka/.lein-*
