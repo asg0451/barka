@@ -12,6 +12,7 @@ pub mod partition_registry;
 pub mod produce_node;
 pub mod produce_router;
 pub mod producer;
+pub mod rebalancer;
 pub mod rpc;
 pub mod s3;
 pub mod segment;

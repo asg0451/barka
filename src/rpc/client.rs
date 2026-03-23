@@ -94,6 +94,14 @@ impl ProduceClient {
         }
         Ok(out)
     }
+
+    pub async fn abdicate(&self, topic: &str, partition: u32) -> anyhow::Result<bool> {
+        let mut req = self.client.abdicate_request();
+        req.get().set_topic(topic);
+        req.get().set_partition(partition);
+        let response = req.send().promise.await?;
+        Ok(response.get()?.get_success())
+    }
 }
 
 /// Cap'n Proto RPC client for consume operations. Uses [`BytesVatNetwork`] so

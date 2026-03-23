@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -41,6 +42,8 @@ pub struct ProduceNodeConfig {
     /// Path segment in S3 before `lock/` and the topic-partition namespace.
     pub leader_election_prefix: Option<String>,
     pub topics: Vec<TopicConfig>,
+    /// How long to back off from leader election after an abdication (seconds).
+    pub abdication_cooldown_secs: u64,
 }
 
 impl Default for ProduceNodeConfig {
@@ -56,6 +59,7 @@ impl Default for ProduceNodeConfig {
                 topic: "default".into(),
                 partitions: 1,
             }],
+            abdication_cooldown_secs: 60,
         }
     }
 }
@@ -76,6 +80,7 @@ struct LeadershipInner {
 #[derive(Debug)]
 pub struct LeadershipState {
     inner: RwLock<LeadershipInner>,
+    cooldown_until_ms: AtomicU64,
 }
 
 impl Default for LeadershipState {
@@ -92,6 +97,7 @@ impl LeadershipState {
                 valid_until_ms: 0,
                 epoch: 0,
             }),
+            cooldown_until_ms: AtomicU64::new(0),
         }
     }
 
@@ -129,6 +135,30 @@ impl LeadershipState {
         inner.is_leader = false;
         inner.valid_until_ms = 0;
         lost_epoch
+    }
+
+    /// Prevent this node from competing for leadership of this partition until
+    /// `duration` has elapsed.
+    pub fn set_cooldown(&self, duration: Duration) {
+        let until_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + duration.as_millis() as u64;
+        self.cooldown_until_ms.store(until_ms, Ordering::Release);
+    }
+
+    /// Returns `true` if this partition is in a cooldown period.
+    pub fn in_cooldown(&self) -> bool {
+        let until = self.cooldown_until_ms.load(Ordering::Acquire);
+        if until == 0 {
+            return false;
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        now_ms < until
     }
 }
 
@@ -192,12 +222,23 @@ impl ProduceNode {
         let rpc_addr = self.config.rpc_addr;
         let partitions = Arc::clone(&self.partitions);
 
+        let abdication_cooldown = Duration::from_secs(self.config.abdication_cooldown_secs);
+        let node_id = self.config.node_id;
+        let s3_config = self.s3_config.clone();
+        let le_prefix = self.config.leader_election_prefix.clone();
         let rpc_handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(serve_produce_rpc(partitions, rpc_addr))
+            rt.block_on(serve_produce_rpc(
+                partitions,
+                rpc_addr,
+                abdication_cooldown,
+                node_id,
+                s3_config,
+                le_prefix,
+            ))
         });
 
         let le_poll = Duration::from_secs(self.config.leader_election_poll_secs);
@@ -481,6 +522,11 @@ async fn run_leader_loop(
 ) -> anyhow::Result<()> {
     let mut prev_epoch: Option<u64> = None;
     loop {
+        if state.in_cooldown() {
+            tracing::debug!(prefix = %span_prefix, "skipping leader election (cooldown active)");
+            tokio::time::sleep(poll_interval).await;
+            continue;
+        }
         match le.try_become_leader().await {
             Ok(TryBecomeLeaderResult::Leader(info)) => {
                 let epoch = info.epoch.as_u64();

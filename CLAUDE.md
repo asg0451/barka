@@ -93,4 +93,4 @@ capnp-rpc is `!Send`, so RPC servers run on dedicated threads with single-thread
 - **Use jq for JSON** — Always use `jq` instead of ad hoc python scripts for parsing JSON in shell commands.
 - **No command substitution in Bash** — Avoid `$(...)` and backtick substitution in shell commands; these require manual approval. Use pipes or separate commands instead.
 - **No `&&` chaining in Bash** — The permission system flags `&&` as ambiguous syntax, forcing manual approval. Use separate Bash tool calls instead.
-
+- **No variable substitution in Bash** — Avoid `$(...)`, backtick substitution, and `VAR=x && cmd "$VAR"` patterns in shell commands; these all require manual approval. Use pipes, separate sequential commands, or hardcode values instead.
