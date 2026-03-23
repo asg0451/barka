@@ -350,7 +350,7 @@ mod tests {
     ) -> Vec<crate::producer::ProducedRecord> {
         let msg = TestMessage::new(n_records, value_prefix);
         producer
-            .apply_produce_request(msg.bytes().clone(), msg.request())
+            .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
             .unwrap()
     }
@@ -366,10 +366,10 @@ mod tests {
         let producer = PartitionProducer::with_opts(
             &s3_config,
             prefix.clone(),
-            0,
             3, // max_records = 3 so each produce fills a segment
             1024 * 1024,
             std::time::Duration::from_secs(60),
+            None,
         )
         .await
         .unwrap();
@@ -462,10 +462,10 @@ mod tests {
         let producer = PartitionProducer::with_opts(
             &s3_config,
             prefix.clone(),
-            0,
             3,
             1024 * 1024,
             std::time::Duration::from_secs(60),
+            None,
         )
         .await
         .unwrap();

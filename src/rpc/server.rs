@@ -79,12 +79,16 @@ impl barka_svc::Server for PerConnectionNode {
             .ok_or_else(|| capnp::Error::failed("missing message bytes".into()))?;
         let req = params.get()?.get_request()?;
 
-        // NOTE: only one producer atm. so only one topic & partition.
-        // TODO: more than one producer, hook up leadership, etc
+        let epoch = self
+            .node
+            .leadership
+            .check_leader()
+            .ok_or_else(|| capnp::Error::failed("not leader for partition".into()))?;
+
         let produced = self
             .node
             .producer
-            .apply_produce_request(raw, req)
+            .apply_produce_request(raw, req, epoch)
             .await
             .map_err(|e| capnp::Error::failed(e.to_string()))?;
 
@@ -164,6 +168,7 @@ mod tests {
         )
         .await
         .unwrap();
+        node.leadership.set_leader(u64::MAX, 0);
 
         let server_node = node.clone();
         let server = tokio::task::spawn_blocking(move || {
@@ -317,6 +322,7 @@ mod tests {
         )
         .await
         .unwrap();
+        node.leadership.set_leader(u64::MAX, 0);
         assert!(
             node.config.producer_limits.is_none(),
             "e2e expects real PartitionProducer::new defaults"
@@ -438,6 +444,7 @@ mod tests {
         )
         .await
         .unwrap();
+        node.leadership.set_leader(u64::MAX, 0);
 
         let server_node = node.clone();
         let server = tokio::task::spawn_blocking(move || {
@@ -548,5 +555,101 @@ mod tests {
 
         let _ = shutdown_tx.send(());
         server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rpc_produce_rejected_when_not_leader() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let s3_config = S3Config {
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            bucket: "test-rpc".into(),
+            region: "us-east-1".into(),
+        };
+        let s3_client = crate::s3::build_client(&s3_config).await;
+        crate::s3::ensure_bucket(&s3_client, &s3_config.bucket)
+            .await
+            .unwrap();
+
+        let node = Node::new(
+            NodeConfig {
+                rpc_addr: addr,
+                s3_prefix: Some(format!(
+                    "rpc-not-leader/{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_nanos()
+                )),
+                ..Default::default()
+            },
+            &s3_config,
+        )
+        .await
+        .unwrap();
+        // Deliberately NOT calling set_leader — node should reject produce.
+
+        let server_node = node.clone();
+        let server = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
+                        let (reader, writer) = futures::AsyncReadExt::split(stream);
+                        let call_bytes_queue: MessageBytesQueue =
+                            Rc::new(RefCell::new(VecDeque::new()));
+                        let network = BytesVatNetwork::new(
+                            futures::io::BufReader::new(reader),
+                            futures::io::BufWriter::new(writer),
+                            rpc_twoparty_capnp::Side::Server,
+                            Default::default(),
+                            call_bytes_queue.clone(),
+                        );
+                        let per_conn = PerConnectionNode {
+                            node: server_node,
+                            msg_bytes: call_bytes_queue,
+                        };
+                        let client: barka_svc::Client = capnp_rpc::new_client(per_conn);
+                        let rpc = RpcSystem::new(Box::new(network), Some(client.client));
+                        rpc.await.unwrap();
+                    })
+                    .await;
+            });
+        });
+
+        let client = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
+                        let client = BarkaClient::connect(addr).await.unwrap();
+                        let err = client
+                            .produce("test-topic", 0, vec![b"should-fail".to_vec()])
+                            .await
+                            .unwrap_err();
+                        let msg = err.to_string();
+                        assert!(
+                            msg.contains("not leader"),
+                            "expected 'not leader' error, got: {msg}"
+                        );
+                    })
+                    .await;
+            });
+        });
+
+        let (c, s) = tokio::join!(client, server);
+        c.unwrap();
+        s.unwrap();
     }
 }

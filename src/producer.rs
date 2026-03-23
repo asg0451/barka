@@ -9,6 +9,7 @@ use tracing::{Instrument, warn};
 
 use crate::{
     log_offset::{self, compose},
+    node::LeadershipState,
     rpc::barka_capnp::produce_request,
     s3::{self, S3Config},
     segment::{self, RecordData},
@@ -43,6 +44,7 @@ struct ProducerInner {
     pending_bytes: usize,
     max_records: usize,
     max_bytes: usize,
+    epoch: u64,
     waiters: Vec<oneshot::Sender<Arc<FlushRound>>>,
 }
 
@@ -53,6 +55,7 @@ impl ProducerInner {
             pending_bytes: 0,
             max_records,
             max_bytes,
+            epoch: 0,
             waiters: Vec::new(),
         }
     }
@@ -166,8 +169,22 @@ impl FlushRound {
 
     /// Encode the collected records as a binary segment and upload to S3 via
     /// scatter-gather (zero additional copies).
-    #[tracing::instrument(skip(self, s3_client), fields(key = %self.key, epoch = self.epoch))]
-    async fn do_flush(&self, s3_client: &Client) -> Result<()> {
+    // NOTE: because this is a lease-based protocol, we may end up writing a
+    // segment to S3 that is not of the latest epoch. This is okay.
+    #[tracing::instrument(skip(self, s3_client, leadership), fields(key = %self.key, epoch = self.epoch))]
+    async fn do_flush(
+        &self,
+        s3_client: &Client,
+        leadership: Option<&LeadershipState>,
+    ) -> Result<()> {
+        if let Some(ls) = leadership
+            && ls.check_leader() != Some(self.epoch)
+        {
+            anyhow::bail!(
+                "leadership lost or epoch changed before flush (expected epoch {})",
+                self.epoch
+            );
+        }
         let mut records = {
             let mut guard = self.records.lock().unwrap();
             std::mem::take(&mut *guard)
@@ -249,22 +266,25 @@ pub struct PartitionProducer {
     s3_client: Client,
     bucket: String,
     prefix: String,
-    /// Writer epoch stored in every segment header (leader / split-brain protocol).
-    epoch: u64,
     next_sequence: AtomicU64,
     inner: Mutex<ProducerInner>,
     linger: Duration,
+    leadership: Option<Arc<LeadershipState>>,
 }
 
 impl PartitionProducer {
-    pub async fn new(s3_config: &S3Config, prefix: String, epoch: u64) -> Result<Arc<Self>> {
+    pub async fn new(
+        s3_config: &S3Config,
+        prefix: String,
+        leadership: Option<Arc<LeadershipState>>,
+    ) -> Result<Arc<Self>> {
         Self::with_opts(
             s3_config,
             prefix,
-            epoch,
             DEFAULT_MAX_RECORDS,
             DEFAULT_MAX_BYTES,
             DEFAULT_LINGER,
+            leadership,
         )
         .await
     }
@@ -272,10 +292,10 @@ impl PartitionProducer {
     pub async fn with_opts(
         s3_config: &S3Config,
         prefix: String,
-        epoch: u64,
         max_records: usize,
         max_bytes: usize,
         linger: Duration,
+        leadership: Option<Arc<LeadershipState>>,
     ) -> Result<Arc<Self>> {
         let s3_client = crate::s3::build_client(s3_config).await;
         let bucket = s3_config.bucket.clone();
@@ -284,13 +304,28 @@ impl PartitionProducer {
             bucket,
             s3_client,
             prefix,
-            epoch,
             next_sequence: AtomicU64::new(next_sequence),
             inner: Mutex::new(ProducerInner::new(max_records, max_bytes)),
             linger,
+            leadership,
         });
         producer.spawn_flush_timer();
         Ok(producer)
+    }
+
+    /// Cancel all pending (unflushed) produce requests. Called when leadership
+    /// is lost or the epoch changes so clients get an error and retry.
+    pub fn cancel_pending(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if !inner.waiters.is_empty() {
+            tracing::info!(
+                pending = inner.waiters.len(),
+                "cancelling pending batch due to leadership change"
+            );
+            inner.waiters.clear();
+            inner.pending_records = 0;
+            inner.pending_bytes = 0;
+        }
     }
 
     fn spawn_flush_timer(self: &Arc<Self>) {
@@ -309,7 +344,7 @@ impl PartitionProducer {
         });
     }
 
-    fn create_flush_round(&self, participants: usize) -> Result<Arc<FlushRound>> {
+    fn create_flush_round(&self, participants: usize, epoch: u64) -> Result<Arc<FlushRound>> {
         let seq = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         if seq > log_offset::MAX_SEGMENT_SEQ {
             anyhow::bail!(
@@ -320,7 +355,7 @@ impl PartitionProducer {
         let key = format!("{}/{:020}.dat", self.prefix, seq);
         Ok(Arc::new(FlushRound::new(
             participants,
-            self.epoch,
+            epoch,
             seq,
             self.bucket.clone(),
             key,
@@ -340,6 +375,7 @@ impl PartitionProducer {
         &self,
         message_bytes: Bytes,
         request: produce_request::Reader<'_>,
+        epoch: u64,
     ) -> Result<Vec<ProducedRecord>> {
         let record_count = request.get_records()?.len() as usize;
         if record_count == 0 {
@@ -354,6 +390,12 @@ impl PartitionProducer {
 
         let pending = {
             let mut inner = self.inner.lock().unwrap();
+            assert!(
+                epoch >= inner.epoch,
+                "epoch must not regress: current {}, got {epoch}",
+                inner.epoch
+            );
+            inner.epoch = epoch;
             if record_count > inner.max_records {
                 anyhow::bail!(
                     "produce request has {} records; max per request is {} (segment batch limit)",
@@ -381,7 +423,7 @@ impl PartitionProducer {
 
             if inner.is_full() {
                 let participants = inner.waiters.len() + 1;
-                let round = self.create_flush_round(participants)?;
+                let round = self.create_flush_round(participants, epoch)?;
                 for tx in inner.waiters.drain(..) {
                     let _ = tx.send(Arc::clone(&round));
                 }
@@ -399,14 +441,16 @@ impl PartitionProducer {
             PendingFlush::Ready(r) => r,
             PendingFlush::Waiting(rx) => rx
                 .await
-                .map_err(|_| anyhow::anyhow!("producer dropped before flush"))?,
+                .map_err(|_| anyhow::anyhow!("batch cancelled (leadership may have changed)"))?,
         };
 
         let done_rx = round.done.subscribe();
         let (is_leader, produced) = round.contribute(&message_bytes, request)?;
 
         if is_leader {
-            let result = round.do_flush(&self.s3_client).await;
+            let result = round
+                .do_flush(&self.s3_client, self.leadership.as_deref())
+                .await;
             let _ = round
                 .done
                 .send(Some(result.as_ref().map(|_| ()).map_err(|e| e.to_string())));
@@ -423,7 +467,8 @@ impl PartitionProducer {
                 return Ok(());
             }
             let participants = inner.waiters.len();
-            let round = self.create_flush_round(participants)?;
+            let epoch = inner.epoch;
+            let round = self.create_flush_round(participants, epoch)?;
             let done_rx = round.done.subscribe();
             for tx in inner.waiters.drain(..) {
                 let _ = tx.send(Arc::clone(&round));
@@ -448,14 +493,6 @@ mod tests {
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
     async fn test_producer(max_records: usize, max_bytes: usize) -> PartitionProducer {
-        test_producer_with_epoch(max_records, max_bytes, 0).await
-    }
-
-    async fn test_producer_with_epoch(
-        max_records: usize,
-        max_bytes: usize,
-        epoch: u64,
-    ) -> PartitionProducer {
         let config = S3Config {
             endpoint_url: Some("http://localhost:4566".to_string()),
             bucket: "test-producer".into(),
@@ -478,10 +515,10 @@ mod tests {
             s3_client,
             bucket: config.bucket,
             prefix,
-            epoch,
             next_sequence: AtomicU64::new(next_sequence),
             inner: Mutex::new(ProducerInner::new(max_records, max_bytes)),
             linger: DEFAULT_LINGER,
+            leadership: None,
         }
     }
 
@@ -502,7 +539,7 @@ mod tests {
         let producer = test_producer(3, 1024 * 1024).await;
         let msg = TestMessage::with_value_size(3, 10);
         let produced = producer
-            .apply_produce_request(msg.bytes().clone(), msg.request())
+            .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
             .unwrap();
         assert_eq!(produced.len(), 3);
@@ -514,7 +551,7 @@ mod tests {
         let (epoch, records) = read_segment(&producer.s3_client, &producer.bucket, &key)
             .await
             .unwrap();
-        assert_eq!(epoch, producer.epoch);
+        assert_eq!(epoch, 0);
         assert_eq!(records.len(), 3);
         for (i, rec) in records.iter().enumerate() {
             assert_eq!(rec.offset, compose(0, i as u64));
@@ -524,10 +561,10 @@ mod tests {
     #[tokio::test]
     async fn segment_epoch_on_producer_is_written() {
         // max_records = 1 so a single-record request fills the batch (tests skip spawn_flush_timer).
-        let producer = test_producer_with_epoch(1, 1024 * 1024, 99).await;
+        let producer = test_producer(1, 1024 * 1024).await;
         let msg = TestMessage::with_value_size(1, 4);
         producer
-            .apply_produce_request(msg.bytes().clone(), msg.request())
+            .apply_produce_request(msg.bytes().clone(), msg.request(), 99)
             .await
             .unwrap();
         let key = format!("{}/{:020}.dat", producer.prefix, 0);
@@ -558,7 +595,7 @@ mod tests {
         let producer = test_producer(3, 1024 * 1024).await;
         let msg = TestMessage::with_value_size(5, 10);
         let err = producer
-            .apply_produce_request(msg.bytes().clone(), msg.request())
+            .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
             .unwrap_err();
         assert!(
@@ -572,7 +609,7 @@ mod tests {
         let producer = test_producer(100, 256).await;
         let msg = TestMessage::with_value_size(1, 200);
         let err = producer
-            .apply_produce_request(msg.bytes().clone(), msg.request())
+            .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
             .unwrap_err();
         assert!(
@@ -586,7 +623,7 @@ mod tests {
         let producer = test_producer(5, 1024 * 1024).await;
         let msg = TestMessage::with_value_size(3, 10);
         let (a, b) = tokio::join!(
-            producer.apply_produce_request(msg.bytes().clone(), msg.request()),
+            producer.apply_produce_request(msg.bytes().clone(), msg.request(), 0),
             producer.flush(),
         );
         let produced = a.unwrap();
@@ -614,8 +651,8 @@ mod tests {
         let m2 = TestMessage::with_value_size(2, 10);
 
         let (a, b) = tokio::join!(
-            producer.apply_produce_request(m1.bytes().clone(), m1.request()),
-            producer.apply_produce_request(m2.bytes().clone(), m2.request()),
+            producer.apply_produce_request(m1.bytes().clone(), m1.request(), 0),
+            producer.apply_produce_request(m2.bytes().clone(), m2.request(), 0),
         );
         a.unwrap();
         b.unwrap();
@@ -636,7 +673,7 @@ mod tests {
 
         let m1 = TestMessage::with_value_size(2, 10);
         let p0 = producer
-            .apply_produce_request(m1.bytes().clone(), m1.request())
+            .apply_produce_request(m1.bytes().clone(), m1.request(), 0)
             .await
             .unwrap();
         assert_eq!(p0.len(), 2);
@@ -645,7 +682,7 @@ mod tests {
 
         let m2 = TestMessage::with_value_size(2, 10);
         let p1 = producer
-            .apply_produce_request(m2.bytes().clone(), m2.request())
+            .apply_produce_request(m2.bytes().clone(), m2.request(), 0)
             .await
             .unwrap();
         assert_eq!(p1.len(), 2);
@@ -673,7 +710,7 @@ mod tests {
         let producer = test_producer(5, 1024 * 1024).await;
         let msg = TestMessage::with_value_size(0, 0);
         producer
-            .apply_produce_request(msg.bytes().clone(), msg.request())
+            .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
             .unwrap();
     }
@@ -688,7 +725,7 @@ mod tests {
 
         let msg = TestMessage::with_value_size(2, 4);
         let produced = producer
-            .apply_produce_request(msg.bytes().clone(), msg.request())
+            .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
             .unwrap();
 
@@ -716,5 +753,109 @@ mod tests {
                 rec.timestamp
             );
         }
+    }
+
+    #[tokio::test]
+    async fn flush_fails_when_leadership_lost() {
+        use crate::node::LeadershipState;
+
+        let leadership = Arc::new(LeadershipState::new());
+        leadership.set_leader(u64::MAX, 1);
+
+        let config = S3Config {
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            bucket: "test-producer".into(),
+            region: "us-east-1".into(),
+        };
+        let s3_client = crate::s3::build_client(&config).await;
+        s3::ensure_bucket(&s3_client, &config.bucket).await.unwrap();
+        let prefix = format!(
+            "test/{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
+        );
+        let next_sequence = discover_next_segment_sequence(&s3_client, &config.bucket, &prefix)
+            .await
+            .unwrap();
+        let producer = PartitionProducer {
+            s3_client,
+            bucket: config.bucket,
+            prefix,
+            next_sequence: AtomicU64::new(next_sequence),
+            inner: Mutex::new(ProducerInner::new(1, 1024 * 1024)),
+            linger: DEFAULT_LINGER,
+            leadership: Some(Arc::clone(&leadership)),
+        };
+
+        // Revoke leadership before produce — flush should fail
+        leadership.set_not_leader();
+
+        let msg = TestMessage::with_value_size(1, 4);
+        let err = producer
+            .apply_produce_request(msg.bytes().clone(), msg.request(), 1)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("leadership lost"),
+            "expected leadership error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_fails_waiting_producers() {
+        use crate::node::LeadershipState;
+
+        let leadership = Arc::new(LeadershipState::new());
+        leadership.set_leader(u64::MAX, 1);
+
+        let config = S3Config {
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            bucket: "test-producer".into(),
+            region: "us-east-1".into(),
+        };
+        let s3_client = crate::s3::build_client(&config).await;
+        s3::ensure_bucket(&s3_client, &config.bucket).await.unwrap();
+        let prefix = format!(
+            "test/{}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
+        );
+        let next_sequence = discover_next_segment_sequence(&s3_client, &config.bucket, &prefix)
+            .await
+            .unwrap();
+        // max_records = 100 so a single request won't fill the batch
+        let producer = Arc::new(PartitionProducer {
+            s3_client,
+            bucket: config.bucket,
+            prefix,
+            next_sequence: AtomicU64::new(next_sequence),
+            inner: Mutex::new(ProducerInner::new(100, 1024 * 1024)),
+            linger: Duration::from_secs(60),
+            leadership: Some(Arc::clone(&leadership)),
+        });
+
+        let msg = TestMessage::with_value_size(1, 4);
+        let p = Arc::clone(&producer);
+        let (produce_result, _) = tokio::join!(
+            p.apply_produce_request(msg.bytes().clone(), msg.request(), 1),
+            async {
+                // Give the produce request time to register as a waiter
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                // Cancel pending — simulates what leader loop does on leadership loss
+                producer.cancel_pending();
+            }
+        );
+
+        let err = produce_result.unwrap_err();
+        assert!(
+            err.to_string().contains("batch cancelled"),
+            "expected cancellation error, got: {err}"
+        );
     }
 }

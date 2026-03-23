@@ -62,7 +62,7 @@ Two communication layers (same backend; the gateway is a frontend only):
 
 2. **Subagent strategy** — Use subagents liberally to keep the main context clean. Offload research, exploration, and parallel analysis to subagents. For hard problems, use more parallel subagent work. One focused task per subagent.
 
-3. **Self-improvement loop** — After any correction from the user, update `tasks/lessons.md` with the pattern and a rule that prevents repeating the mistake. Iterate on those lessons; at session start, skim lessons that apply to this project.
+3. **Self-improvement loop** — After any correction from the user, update `tasks/lessons.md` with the pattern and a rule that prevents repeating the mistake. Iterate on those lessons.
 
 4. **Verification before done** — Do not mark work complete without evidence it works. When useful, compare behavior against main (or baseline) and your branch. Ask whether a staff engineer would accept the change. Run tests, inspect logs, and show correctness.
 
@@ -72,12 +72,14 @@ Two communication layers (same backend; the gateway is a frontend only):
 
 ### Task management
 
+0. **Read lessons** — Before starting work, read `tasks/lessons.md` (if it exists). Apply anything relevant to the current task.
 1. **Plan first** — Write the plan to `tasks/todo.md` with checkable items (create `tasks/` if it does not exist yet).
 2. **Verify plan** — Sanity-check the plan before coding.
 3. **Track progress** — Check items off as you finish them.
 4. **Explain changes** — Give a short high-level summary at each meaningful step.
 5. **Document results** — Add a brief review section to `tasks/todo.md` when wrapping up.
-6. **Capture lessons** — After user corrections, update `tasks/lessons.md`.
+6. **Clean up** — Once the user confirms the solution is good, delete `tasks/todo.md`.
+7. **Capture lessons** — After user corrections, update `tasks/lessons.md`.
 
 ### Core principles
 

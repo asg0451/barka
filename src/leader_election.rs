@@ -20,6 +20,10 @@ struct LockFile {
 pub struct Epoch(u64);
 
 impl Epoch {
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+
     // format: {prefix}/{epoch}.lock
     fn from_key(key: &str) -> Result<Self> {
         let epoch = key
