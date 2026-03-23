@@ -8,7 +8,8 @@
             [jepsen.db :as db]
             [jepsen.store :as store])
   (:import (java.lang ProcessBuilder$Redirect)
-           (java.net Socket InetSocketAddress HttpURLConnection URL)))
+           (java.net Socket InetSocketAddress HttpURLConnection URL)
+           (java.util UUID)))
 
 (def barka-bin
   "Path to the barka binary. Override via :barka-bin in test opts."
@@ -74,6 +75,7 @@
    Starts one barka process per node, each on its own port pair."
   [opts]
   (let [bin       (get opts :barka-bin barka-bin)
+        run-id    (str (UUID/randomUUID))
         processes (atom {})]
     (reify db/DB
       (setup! [_ test node]
@@ -92,11 +94,12 @@
               (.put "AWS_ACCESS_KEY_ID" "test")
               (.put "AWS_SECRET_ACCESS_KEY" "test")
               (.put "AWS_REGION" "us-east-1")
-              (.put "RUST_LOG" "debug")
+              (.put "RUST_LOG" "barka=debug")
               (.put "RUST_BACKTRACE" "1")
               (.put "BARKA_NODE_ID" (str idx))
               (.put "BARKA_RPC_PORT" (str rpc-port))
-              (.put "BARKA_JEPSEN_GATEWAY_PORT" (str gw-port)))
+              (.put "BARKA_JEPSEN_GATEWAY_PORT" (str gw-port))
+              (.put "BARKA_S3_PREFIX" (str "jepsen/" run-id)))
             (let [proc (.start pb)]
               (swap! processes assoc node proc)
               (wait-for (str "barka jepsen gateway " node)

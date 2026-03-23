@@ -52,12 +52,8 @@
       (:offset resp)
       (throw (ex-info "produce failed" resp)))))
 
-;; TODO: consume offset is composite: 40-bit segment + 24-bit intra (see Rust
-;; `log_offset`). Once an S3-backed consumer exists, either the server should
-;; accept a sequential "cursor" and translate internally, or this client needs
-;; to understand composite offsets for seeking across segment boundaries.
 (defn consume!
-  "Sends a consume request. Returns vector of string values."
+  "Sends a consume request. Returns {:values [str ...] :next-offset n}."
   [conn topic partition offset max-records]
   (let [resp (request! conn {:op "consume"
                              :topic topic
@@ -65,5 +61,6 @@
                              :offset offset
                              :max max-records})]
     (if (:ok resp)
-      (:values resp)
+      {:values      (:values resp)
+       :next-offset (:next_offset resp)}
       (throw (ex-info "consume failed" resp)))))

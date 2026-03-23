@@ -73,21 +73,15 @@
           (let [offset (barka/produce! conn "default" 0 (:value op))]
             (assoc op :type :ok :offset offset))
 
-          ;; TODO: consume is broken — needs S3-backed reader.
-          ;; The in-memory scaffold is no longer populated by the produce path.
-          ;; Once an S3 consumer exists, this also needs to handle composite
-          ;; offsets: 40-bit segment_seq in the high bits, 24-bit intra in the low
-          ;; (see barka `log_offset` module). Incrementing by 1 only works within
-          ;; a segment, not across segment boundaries.
           :consume
-          (let [off    @consume-offset
-                values (barka/consume! conn "default" 0 off 1)]
+          (let [off  @consume-offset
+                resp (barka/consume! conn "default" 0 off 1)]
             (cond
-              (empty? values)
+              (empty? (:values resp))
               (assoc op :type :fail :error :empty)
 
-              (compare-and-set! consume-offset off (inc off))
-              (assoc op :type :ok :value (parse-long (first values)))
+              (compare-and-set! consume-offset off (:next-offset resp))
+              (assoc op :type :ok :value (parse-long (first (:values resp))))
 
               :else
               (assoc op :type :fail :error :cas-failed))))

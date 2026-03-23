@@ -19,6 +19,10 @@ use crate::rpc::client::BarkaClient;
 /// Max time for a single produce/consume RPC before returning `{"ok":false,"error":"..."}`.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Produce retry settings for transient errors (leadership transitions).
+const PRODUCE_MAX_RETRIES: u32 = 5;
+const PRODUCE_RETRY_DELAY: Duration = Duration::from_millis(200);
+
 /// Protocol: newline-delimited JSON.
 ///
 /// Request:  `{"op":"produce","topic":"events","partition":0,"value":"hello"}`
@@ -116,9 +120,18 @@ struct JsonlResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    next_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     values: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+fn is_transient_produce_error(msg: &str) -> bool {
+    msg.contains("not leader")
+        || msg.contains("leadership lost")
+        || msg.contains("batch cancelled")
+        || msg.contains("epoch changed")
 }
 
 async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
@@ -128,6 +141,7 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
             return JsonlResponse {
                 ok: false,
                 offset: None,
+                next_offset: None,
                 values: None,
                 error: Some(format!("bad request: {e}")),
             };
@@ -137,38 +151,69 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
     match req.op.as_str() {
         "produce" => {
             let value = req.value.unwrap_or_default().into_bytes();
-            match tokio::time::timeout(
-                REQUEST_TIMEOUT,
-                client.produce(&req.topic, req.partition, vec![value]),
-            )
-            .await
-            {
-                Ok(Ok(records)) => JsonlResponse {
-                    ok: true,
-                    offset: records.first().map(|r| r.offset),
-                    values: None,
-                    error: None,
-                },
-                Ok(Err(e)) => JsonlResponse {
-                    ok: false,
-                    offset: None,
-                    values: None,
-                    error: Some(e.to_string()),
-                },
-                Err(_elapsed) => {
-                    warn!(
-                        topic = %req.topic,
-                        partition = req.partition,
-                        ?REQUEST_TIMEOUT,
-                        "jepsen gateway produce timed out"
-                    );
-                    JsonlResponse {
-                        ok: false,
-                        offset: None,
-                        values: None,
-                        error: Some(format!("request timed out after {:?}", REQUEST_TIMEOUT)),
+            let mut last_err = String::new();
+            for attempt in 0..=PRODUCE_MAX_RETRIES {
+                if attempt > 0 {
+                    tokio::time::sleep(PRODUCE_RETRY_DELAY).await;
+                }
+                match tokio::time::timeout(
+                    REQUEST_TIMEOUT,
+                    client.produce(&req.topic, req.partition, vec![value.clone()]),
+                )
+                .await
+                {
+                    Ok(Ok(records)) => {
+                        return JsonlResponse {
+                            ok: true,
+                            offset: records.first().map(|r| r.offset),
+                            next_offset: None,
+                            values: None,
+                            error: None,
+                        };
+                    }
+                    Ok(Err(e)) => {
+                        let msg = e.to_string();
+                        if is_transient_produce_error(&msg) && attempt < PRODUCE_MAX_RETRIES {
+                            warn!(
+                                topic = %req.topic,
+                                attempt,
+                                error = %msg,
+                                "jepsen gateway produce retrying",
+                            );
+                            last_err = msg;
+                            continue;
+                        }
+                        return JsonlResponse {
+                            ok: false,
+                            offset: None,
+                            next_offset: None,
+                            values: None,
+                            error: Some(msg),
+                        };
+                    }
+                    Err(_elapsed) => {
+                        warn!(
+                            topic = %req.topic,
+                            partition = req.partition,
+                            ?REQUEST_TIMEOUT,
+                            "jepsen gateway produce timed out"
+                        );
+                        return JsonlResponse {
+                            ok: false,
+                            offset: None,
+                            next_offset: None,
+                            values: None,
+                            error: Some(format!("request timed out after {:?}", REQUEST_TIMEOUT)),
+                        };
                     }
                 }
+            }
+            JsonlResponse {
+                ok: false,
+                offset: None,
+                next_offset: None,
+                values: None,
+                error: Some(format!("produce failed after retries: {last_err}")),
             }
         }
         "consume" => {
@@ -179,6 +224,7 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
             .await
             {
                 Ok(Ok(records)) => {
+                    let next_offset = records.last().map(|r| r.offset + 1);
                     let values: Vec<String> = records
                         .iter()
                         .map(|r| String::from_utf8_lossy(&r.value).to_string())
@@ -186,6 +232,7 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
                     JsonlResponse {
                         ok: true,
                         offset: None,
+                        next_offset,
                         values: Some(values),
                         error: None,
                     }
@@ -193,6 +240,7 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
                 Ok(Err(e)) => JsonlResponse {
                     ok: false,
                     offset: None,
+                    next_offset: None,
                     values: None,
                     error: Some(e.to_string()),
                 },
@@ -206,6 +254,7 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
                     JsonlResponse {
                         ok: false,
                         offset: None,
+                        next_offset: None,
                         values: None,
                         error: Some(format!("request timed out after {:?}", REQUEST_TIMEOUT)),
                     }
@@ -215,6 +264,7 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
         other => JsonlResponse {
             ok: false,
             offset: None,
+            next_offset: None,
             values: None,
             error: Some(format!("unknown op: {other}")),
         },
