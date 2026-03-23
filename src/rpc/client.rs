@@ -135,6 +135,10 @@ impl ConsumeClient {
         builder.set_partition(partition);
         builder.set_offset(offset);
         builder.set_max_records(max_records);
+
+        // Drain Returns from prior RPCs (e.g. the bootstrap handshake) so
+        // that after the await the queue contains exactly our response.
+        self.return_queue.borrow_mut().clear();
         let response = req.send().promise.await?;
 
         let raw = self
