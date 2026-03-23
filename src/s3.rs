@@ -333,7 +333,7 @@ enum S3CASOutcome {
 /// Returns `None` for errors unrelated to conditional-write semantics
 /// (e.g. network failures, auth errors), leaving them for the caller to
 /// classify as transient or fatal.
-fn classify_put_if_absent_error(err: &SdkError<PutObjectError>) -> Option<S3CASOutcome> {
+fn classify_s3_cas_error(err: &SdkError<PutObjectError>) -> Option<S3CASOutcome> {
     let status = err.raw_response().map(|r| r.status().as_u16());
     let code = err.code();
 
@@ -388,7 +388,7 @@ pub async fn put_if_absent(
                 .await
             {
                 Ok(_) => RetryResult::Done(PutOutcome::Created),
-                Err(e) => match classify_put_if_absent_error(&e) {
+                Err(e) => match classify_s3_cas_error(&e) {
                     Some(S3CASOutcome::AlreadyExists) => {
                         RetryResult::Done(PutOutcome::AlreadyExists)
                     }
@@ -397,6 +397,104 @@ pub async fn put_if_absent(
                         RetryResult::Retry(anyhow::anyhow!(e).context("s3: put if absent"))
                     }
                     None => RetryResult::Fail(anyhow::anyhow!(e).context("s3: put if absent")),
+                },
+            }
+        }
+    })
+    .await
+}
+
+/// An S3 object body together with its ETag, used for CAS (read-modify-write)
+/// workflows where the caller needs the ETag to do a conditional PUT later.
+pub struct ObjectWithEtag {
+    pub body: Bytes,
+    pub etag: String,
+}
+
+/// Fetch an object's body and ETag. Returns `None` if the key does not exist.
+#[tracing::instrument(level = "debug", skip(client), err)]
+pub async fn get_object_with_etag(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<Option<ObjectWithEtag>> {
+    retry_with_backoff("get object with etag", || {
+        let client = client.clone();
+        let bucket = bucket.to_owned();
+        let key = key.to_owned();
+        async move {
+            let output = match client.get_object().bucket(&bucket).key(&key).send().await {
+                Ok(o) => o,
+                Err(e) if get_object_err_is_no_such_key(&e) => return RetryResult::Done(None),
+                Err(e) if is_transient_s3_error(&e) => {
+                    return RetryResult::Retry(
+                        anyhow::anyhow!(e).context("s3: get object with etag"),
+                    );
+                }
+                Err(e) => {
+                    return RetryResult::Fail(
+                        anyhow::anyhow!(e).context("s3: get object with etag"),
+                    );
+                }
+            };
+            let etag = output.e_tag().unwrap_or("").to_string();
+            match output.body.collect().await {
+                Ok(body) => RetryResult::Done(Some(ObjectWithEtag {
+                    body: body.into_bytes(),
+                    etag,
+                })),
+                Err(e) => RetryResult::Retry(anyhow::anyhow!(e).context("s3: read object body")),
+            }
+        }
+    })
+    .await
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PutIfMatchOutcome {
+    Updated,
+    /// ETag mismatch — the object was modified since the caller read it.
+    Conflict,
+}
+
+/// Conditional-put: writes `body` to `key` only if the current object's ETag
+/// matches `etag` (S3 `if-match`). Returns [`PutIfMatchOutcome::Conflict`] on
+/// ETag mismatch (HTTP 412). Retries transient errors and 409 conflicts.
+#[tracing::instrument(level = "debug", skip(client, body), err)]
+pub async fn put_if_match(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    body: Bytes,
+    etag: &str,
+) -> Result<PutIfMatchOutcome> {
+    retry_with_backoff("put if match", || {
+        let client = client.clone();
+        let bucket = bucket.to_owned();
+        let key = key.to_owned();
+        let body = body.clone();
+        let etag = etag.to_owned();
+        async move {
+            match client
+                .put_object()
+                .bucket(&bucket)
+                .key(key)
+                .body(ByteStream::from(SdkBody::from(body)))
+                .if_match(etag)
+                .send()
+                .await
+            {
+                Ok(_) => RetryResult::Done(PutIfMatchOutcome::Updated),
+                Err(e) => match classify_s3_cas_error(&e) {
+                    Some(S3CASOutcome::AlreadyExists) => {
+                        // 412 = ETag mismatch (object changed since read)
+                        RetryResult::Done(PutIfMatchOutcome::Conflict)
+                    }
+                    Some(S3CASOutcome::RetryableConflict) => RetryResult::Retry(anyhow::anyhow!(e)),
+                    None if is_transient_s3_error(&e) => {
+                        RetryResult::Retry(anyhow::anyhow!(e).context("s3: put if match"))
+                    }
+                    None => RetryResult::Fail(anyhow::anyhow!(e).context("s3: put if match")),
                 },
             }
         }
@@ -479,7 +577,7 @@ pub async fn put_if_absent_stream(
                 .await
             {
                 Ok(_) => RetryResult::Done(PutOutcome::Created),
-                Err(e) => match classify_put_if_absent_error(&e) {
+                Err(e) => match classify_s3_cas_error(&e) {
                     Some(S3CASOutcome::AlreadyExists) => {
                         RetryResult::Done(PutOutcome::AlreadyExists)
                     }

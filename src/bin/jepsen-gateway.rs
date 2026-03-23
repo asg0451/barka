@@ -25,6 +25,10 @@ struct Cli {
 
     #[arg(long, env = "BARKA_AWS_REGION", default_value = "us-east-1")]
     aws_region: String,
+
+    /// Path segment in S3 before `lock/` (must match produce-node's --leader-election-prefix).
+    #[arg(long, env = "BARKA_LEADER_ELECTION_PREFIX")]
+    leader_election_prefix: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -55,5 +59,6 @@ fn main() -> anyhow::Result<()> {
         cli.consume_rpc_addr,
         cli.listen_addr,
         s3_config,
+        cli.leader_election_prefix,
     ))
 }

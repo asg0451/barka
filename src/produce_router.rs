@@ -5,10 +5,11 @@ use anyhow::{Context, Result};
 use crate::leader_election;
 use crate::log::record::Record;
 use crate::node::leader_namespace;
+use crate::partition_registry::PartitionRegistry;
 use crate::rpc::client::ProduceClient;
 use crate::s3::S3Config;
 
-const MAX_RETRIES: u32 = 5;
+const MAX_RETRIES: u32 = 15;
 const BASE_DELAY_MS: u64 = 200;
 const MAX_DELAY_MS: u64 = 10_000;
 
@@ -17,6 +18,7 @@ pub struct ProduceRouter {
     bucket: String,
     leader_election_prefix: Option<String>,
     cached: Option<CachedLeader>,
+    registry: PartitionRegistry,
 }
 
 struct CachedLeader {
@@ -29,11 +31,17 @@ struct CachedLeader {
 impl ProduceRouter {
     pub async fn new(s3_config: &S3Config, leader_election_prefix: Option<String>) -> Self {
         let s3_client = crate::s3::build_client(s3_config).await;
+        let registry = PartitionRegistry::new(
+            s3_client.clone(),
+            s3_config.bucket.clone(),
+            leader_election_prefix.as_deref(),
+        );
         Self {
             s3_client,
             bucket: s3_config.bucket.clone(),
             leader_election_prefix,
             cached: None,
+            registry,
         }
     }
 
@@ -67,6 +75,13 @@ impl ProduceRouter {
                     Ok(Some(l)) => l,
                     Ok(None) => {
                         tracing::warn!(attempt, %namespace, "no leader found");
+                        // Ensure this partition is in the registry so a
+                        // produce-node will pick it up and start LE for it.
+                        if attempt <= 1
+                            && let Err(e) = self.registry.add(topic, partition).await
+                        {
+                            tracing::warn!(error = %e, "registry add failed");
+                        }
                         continue;
                     }
                     Err(e) if attempt < MAX_RETRIES => {
@@ -141,6 +156,7 @@ impl ProduceRouter {
 
 fn is_retriable(msg: &str) -> bool {
     msg.contains("not leader")
+        || msg.contains("not configured")
         || msg.contains("leadership lost")
         || msg.contains("batch cancelled")
         || msg.contains("epoch changed")
