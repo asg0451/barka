@@ -267,6 +267,7 @@ impl LeaderElection {
 
             if let Err(e) = s3::put_object(&self.s3_client, &self.bucket, key, body).await {
                 tracing::warn!(attempt, error = %e, "lease renewal put failed, retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt))).await;
                 continue;
             }
 
@@ -298,6 +299,8 @@ impl LeaderElection {
                 }
                 Err(e) => {
                     tracing::warn!(attempt, error = %e, "lease renewal verify-list failed, retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << attempt)))
+                        .await;
                     continue;
                 }
             }
