@@ -30,7 +30,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install capnproto
-        run: sudo apt-get update && sudo apt-get install -y capnproto
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
+          sudo apt-get update && sudo apt-get install -y capnproto
 
       - uses: dtolnay/rust-toolchain@v1
         with:
