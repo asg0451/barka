@@ -47,9 +47,7 @@ pub async fn serve(
                 info!(%remote, "jepsen gateway connection");
 
                 tokio::task::spawn_local(async move {
-                    if let Err(e) =
-                        run_session(stream, produce_rpc_addr, consume_rpc_addr).await
-                    {
+                    if let Err(e) = run_session(stream, produce_rpc_addr, consume_rpc_addr).await {
                         error!(%e, "jepsen gateway session ended with error");
                     }
                 });

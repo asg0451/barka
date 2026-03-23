@@ -7,7 +7,11 @@ use tracing_subscriber::fmt::format::FmtSpan;
 #[derive(Parser)]
 #[command(name = "jepsen-gateway", version, about = "Barka Jepsen test gateway")]
 struct Cli {
-    #[arg(long, env = "BARKA_JEPSEN_LISTEN_ADDR", default_value = "127.0.0.1:9293")]
+    #[arg(
+        long,
+        env = "BARKA_JEPSEN_LISTEN_ADDR",
+        default_value = "127.0.0.1:9293"
+    )]
     listen_addr: SocketAddr,
 
     #[arg(long, env = "BARKA_PRODUCE_RPC_ADDR", default_value = "127.0.0.1:9292")]

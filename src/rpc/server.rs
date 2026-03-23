@@ -230,31 +230,24 @@ mod tests {
         let partition_prefix = format!("{prefix}/test/0");
         let leadership = Arc::new(LeadershipState::new());
         let producer = match limits {
-            Some(l) => {
-                PartitionProducer::with_opts(
-                    s3_config,
-                    partition_prefix,
-                    l.max_records,
-                    l.max_bytes,
-                    l.linger(),
-                    Arc::clone(&leadership),
-                )
+            Some(l) => PartitionProducer::with_opts(
+                s3_config,
+                partition_prefix,
+                l.max_records,
+                l.max_bytes,
+                l.linger(),
+                Arc::clone(&leadership),
+            )
+            .await
+            .unwrap(),
+            None => PartitionProducer::new(s3_config, partition_prefix, Arc::clone(&leadership))
                 .await
-                .unwrap()
-            }
-            None => {
-                PartitionProducer::new(s3_config, partition_prefix, Arc::clone(&leadership))
-                    .await
-                    .unwrap()
-            }
+                .unwrap(),
         };
         (producer, leadership)
     }
 
-    async fn make_consume_parts(
-        s3_config: &S3Config,
-        s3_prefix: &str,
-    ) -> Arc<PartitionConsumer> {
+    async fn make_consume_parts(s3_config: &S3Config, s3_prefix: &str) -> Arc<PartitionConsumer> {
         let prefix = segment_key_prefix(Some(s3_prefix));
         let partition_prefix = format!("{prefix}/test/0");
         let cache_dir = std::env::temp_dir()
@@ -456,12 +449,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (producer, leadership) = make_produce_parts(
-            &s3_config,
-            &unique_prefix("rpc-default-limits"),
-            None,
-        )
-        .await;
+        let (producer, leadership) =
+            make_produce_parts(&s3_config, &unique_prefix("rpc-default-limits"), None).await;
         leadership.set_leader(u64::MAX, 0);
 
         let p = Arc::clone(&producer);
@@ -688,12 +677,8 @@ mod tests {
             .await
             .unwrap();
 
-        let (producer, _leadership) = make_produce_parts(
-            &s3_config,
-            &unique_prefix("rpc-not-leader"),
-            None,
-        )
-        .await;
+        let (producer, _leadership) =
+            make_produce_parts(&s3_config, &unique_prefix("rpc-not-leader"), None).await;
         // Deliberately NOT calling set_leader — node should reject produce.
         let leadership = Arc::new(LeadershipState::new());
 
