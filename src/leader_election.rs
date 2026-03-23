@@ -109,7 +109,7 @@ impl LeaderElection {
     // 7. Otherwise, another process already is the leader, so do nothing.
     //    Go back to 1. periodically
     // also we probably want a background process deleting old lock files..
-    #[tracing::instrument(skip_all, fields(node_id = self.node_id, prefix = self.prefix, bucket = self.bucket), err, ret)]
+    #[tracing::instrument(level = "debug", skip_all, fields(node_id = self.node_id, prefix = self.prefix, bucket = self.bucket), err, ret)]
     pub async fn try_become_leader(&self) -> Result<TryBecomeLeaderResult> {
         for _ in 0..TRY_BECOME_LEADER_MAX_LIST_GET_RACES {
             let contents = s3::list_objects(&self.s3_client, &self.bucket, &self.prefix).await?;
@@ -218,7 +218,7 @@ impl LeaderElection {
     /// see the expired flag and can immediately start a new election instead of
     /// waiting for `valid_until_ms` to pass. It is not safe to call abdicate if
     /// you do not think you are the leader.
-    #[tracing::instrument(skip_all, fields(node_id = self.node_id, epoch = epoch.0), err)]
+    #[tracing::instrument(level = "debug", skip_all, fields(node_id = self.node_id, epoch = epoch.0), err)]
     pub async fn abdicate(&self, epoch: Epoch) -> Result<()> {
         let key = epoch.to_key(&self.prefix);
         let body = serde_json::to_string(&LockFile {

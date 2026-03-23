@@ -34,7 +34,7 @@ impl Default for S3Config {
 }
 
 /// Build an S3 client. Points at LocalStack when `config.endpoint_url` is set.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(level = "debug", skip_all)]
 pub async fn build_client(config: &S3Config) -> Client {
     let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(Region::new(config.region.clone()))
@@ -50,7 +50,7 @@ pub async fn build_client(config: &S3Config) -> Client {
 }
 
 /// Ensure the bucket exists, creating it if necessary.
-#[tracing::instrument(skip(client), err)]
+#[tracing::instrument(level = "debug", skip(client), err)]
 pub async fn ensure_bucket(client: &Client, bucket: &str) -> Result<()> {
     match client.head_bucket().bucket(bucket).send().await {
         Ok(_) => Ok(()),
@@ -80,7 +80,7 @@ enum RetryResult<T> {
     Fail(anyhow::Error),
 }
 
-#[tracing::instrument(skip_all, fields(op), err)]
+#[tracing::instrument(level = "debug", skip_all, fields(op), err)]
 async fn retry_with_backoff<T, Fut, F>(op: &str, mut f: F) -> Result<T>
 where
     F: FnMut() -> Fut,
@@ -88,7 +88,7 @@ where
 {
     let mut attempt = 0u32;
     loop {
-        let span = tracing::info_span!("retry_attempt", %op, attempt);
+        let span = tracing::debug_span!("retry_attempt", %op, attempt);
         match tracing::Instrument::instrument(f(), span).await {
             RetryResult::Done(v) => return Ok(v),
             RetryResult::Fail(e) => return Err(e),
@@ -144,7 +144,7 @@ fn is_transient_s3_error<E>(err: &SdkError<E>) -> bool {
 
 /// List objects under `prefix` (single page). Fails if the response is
 /// truncated (>1 000 keys).
-#[tracing::instrument(skip(client), err)]
+#[tracing::instrument(level = "debug", skip(client), err)]
 pub async fn list_objects(
     client: &Client,
     bucket: &str,
@@ -190,7 +190,7 @@ fn get_object_err_is_no_such_key(err: &SdkError<GetObjectError>) -> bool {
 ///
 /// Returns [`Ok(None)`] if the key does not exist (**NoSuchKey**), e.g. when
 /// another client deleted the object after a list.
-#[tracing::instrument(skip(client), err)]
+#[tracing::instrument(level = "debug", skip(client), err)]
 pub async fn get_object_reader_if_present(
     client: &Client,
     bucket: &str,
@@ -205,7 +205,7 @@ pub async fn get_object_reader_if_present(
 ///
 /// Returns [`Ok(None)`] if the key does not exist (**NoSuchKey**).
 /// Retries transient S3 errors with jittered exponential backoff.
-#[tracing::instrument(skip(client), err)]
+#[tracing::instrument(level = "debug", skip(client), err)]
 pub async fn get_object_bytes_if_present(
     client: &Client,
     bucket: &str,
@@ -235,7 +235,7 @@ pub async fn get_object_bytes_if_present(
 
 /// Fetch an object's body as a reader. The response is buffered in memory
 /// but not flattened into a single contiguous allocation.
-#[tracing::instrument(skip(client), err)]
+#[tracing::instrument(level = "debug", skip(client), err)]
 pub async fn get_object_reader(
     client: &Client,
     bucket: &str,
@@ -248,7 +248,7 @@ pub async fn get_object_reader(
 }
 
 /// Unconditional put: writes `body` to `key`, overwriting any existing object.
-#[tracing::instrument(skip(client, body), err)]
+#[tracing::instrument(level = "debug", skip(client, body), err)]
 pub async fn put_object(client: &Client, bucket: &str, key: &str, body: String) -> Result<()> {
     retry_with_backoff("put object", || {
         let client = client.clone();
@@ -278,7 +278,7 @@ pub async fn put_object(client: &Client, bucket: &str, key: &str, body: String) 
 /// Batch-delete objects by key. Silently succeeds on an empty list.
 /// Keys are capped at 1 000 per the S3 DeleteObjects API (matches our
 /// list_objects cap, so callers that list-then-delete are always safe).
-#[tracing::instrument(skip(client, keys), fields(count = keys.len()), err)]
+#[tracing::instrument(level = "debug", skip(client, keys), fields(count = keys.len()), err)]
 pub async fn delete_objects(client: &Client, bucket: &str, keys: Vec<String>) -> Result<()> {
     if keys.is_empty() {
         return Ok(());
@@ -365,7 +365,7 @@ pub enum PutOutcome {
 /// Conditional-put: writes `body` to `key` only if no object exists there
 /// (S3 `if-none-match: *`). Retries transient S3 errors and 409 conflicts
 /// with jittered exponential backoff (up to 4 attempts).
-#[tracing::instrument(skip(client, body), err)]
+#[tracing::instrument(level = "debug", skip(client, body), err)]
 pub async fn put_if_absent(
     client: &Client,
     bucket: &str,
@@ -452,7 +452,7 @@ impl http_body::Body for GatherBody {
 
 /// Conditional-put via scatter-gather: streams `chunks` as a single S3 PUT
 /// body, using `if-none-match: *` semantics. Retries with backoff.
-#[tracing::instrument(skip(client, chunks), err)]
+#[tracing::instrument(level = "debug", skip(client, chunks), err)]
 pub async fn put_if_absent_stream(
     client: &Client,
     bucket: &str,
