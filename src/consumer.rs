@@ -4,7 +4,6 @@
 //! tokio runtime, keeping the `!Send` capnp-rpc `LocalSet` non-blocking.
 //! The RPC handler communicates with the I/O thread via channels.
 
-use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,7 +60,6 @@ const FETCH_CHANNEL_CAPACITY: usize = 64;
 
 pub struct PartitionConsumer {
     request_tx: mpsc::Sender<FetchRequest>,
-    prefetched: std::sync::Mutex<HashSet<u64>>,
     _io_thread: std::thread::JoinHandle<()>,
 }
 
@@ -96,7 +94,6 @@ impl PartitionConsumer {
         info!(%prefix, "partition consumer started");
         Ok(Arc::new(Self {
             request_tx: tx,
-            prefetched: std::sync::Mutex::new(HashSet::new()),
             _io_thread: io_thread,
         }))
     }
@@ -167,14 +164,8 @@ impl PartitionConsumer {
     }
 
     /// Fire-and-forget prefetch: send the request but drop the reply channel.
-    /// Skips segments that have already been prefetched.
+    /// No client-side dedup — the I/O thread's cache handles duplicates.
     fn prefetch(&self, seg_seq: u64) {
-        {
-            let mut set = self.prefetched.lock().unwrap();
-            if !set.insert(seg_seq) {
-                return;
-            }
-        }
         let (tx, _rx) = oneshot::channel();
         let _ = self.request_tx.try_send(FetchRequest {
             segment_seq: seg_seq,
@@ -223,15 +214,14 @@ impl IoState {
             return Ok(Some(Arc::clone(records)));
         }
 
-        // Tier 2: disk cache hit — read file, decode, promote to memory cache
-        if let Some(path) = self.disk_cache.peek(&seg_seq).cloned() {
+        // Tier 2: disk cache hit — read file, decode, return.
+        // No memory promotion: these segments are large, let the kernel page cache handle it.
+        if let Some(path) = self.disk_cache.get(&seg_seq).cloned() {
             if path.exists() {
                 debug!(seg_seq, path = %path.display(), "disk cache hit");
                 let buf = tokio::fs::read(&path).await?;
                 let (_epoch, records) = segment::decode(&buf)?;
-                let records = Arc::new(records);
-                self.mem_cache.push(seg_seq, Arc::clone(&records));
-                return Ok(Some(records));
+                return Ok(Some(Arc::new(records)));
             }
             // Stale entry — file was removed externally.
             self.disk_cache.pop(&seg_seq);
@@ -263,11 +253,15 @@ impl IoState {
             {
                 warn!(path = %evicted_path.display(), error = %e, "failed to remove evicted segment file");
             }
-            // Also keep decoded records in memory for the immediate consumer response
-            self.mem_cache.push(seg_seq, Arc::clone(&records));
         }
 
         Ok(Some(records))
+    }
+}
+
+impl Drop for IoState {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.config.cache_dir);
     }
 }
 
