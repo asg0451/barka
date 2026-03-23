@@ -40,6 +40,10 @@ Jepsen (and integration tests in general) must use a unique S3 prefix per run. W
 
 This project has no production deployments. Don't add `#[serde(default)]`, migration code, or other backward-compat scaffolding for format changes. If the format changes, it changes — old data is irrelevant.
 
+## Use jq for JSON parsing, not ad hoc python scripts
+
+Always use `jq` instead of ad hoc python scripts for parsing JSON in shell commands. It's simpler and more appropriate.
+
 ## Don't reuse field names with different semantics
 
 When adding a field to a response struct that means something different from an existing field (e.g., `offset` for produce base offset vs. consume cursor), give it a distinct name (`next_offset`). Don't reuse-and-comment — rename.

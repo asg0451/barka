@@ -47,7 +47,7 @@ capnp-rpc is `!Send`, so RPC servers run on dedicated threads with single-thread
 - After winning an election, old epoch lock files are deleted via a fire-and-forget `tokio::spawn` (best-effort cleanup; failures are logged as warnings).
 
 ### Running tests
-- Unit tests in `leader_election` require **LocalStack** running locally with S3 enabled: `docker run -d -p 4566:4566 localstack/localstack`
+- Unit tests in `leader_election` require **LocalStack** running locally with S3 enabled: `docker run -d -p 4566:4566 localstack/localstack:community-archive`
 - Tests use unique bucket names (timestamp + atomic counter) for isolation when running in parallel. The counter matters because macOS clock resolution can cause nanosecond-timestamp collisions.
 - Race-condition tests use `#[tokio::test(flavor = "multi_thread")]` with `tokio::sync::Barrier` to synchronize concurrent `try_become_leader` calls.
 
@@ -90,4 +90,6 @@ capnp-rpc is `!Send`, so RPC servers run on dedicated threads with single-thread
 - **Simplicity first** — Make each change as small and direct as possible; touch only what the task requires.
 - **No laziness** — Find root causes; avoid temporary or cosmetic fixes. Hold work to senior-engineer standards.
 - **Never rebase** — Always use merge commits. Do not use `git rebase` under any circumstances.
+- **Use jq for JSON** — Always use `jq` instead of ad hoc python scripts for parsing JSON in shell commands.
 - **No command substitution in Bash** — Avoid `$(...)` and backtick substitution in shell commands; these require manual approval. Use pipes or separate commands instead.
+

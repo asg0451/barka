@@ -26,7 +26,7 @@ localstack:
 			-e SERVICES=s3 \
 			-e DEFAULT_REGION=us-east-1 \
 			-e EAGER_SERVICE_LOADING=1 \
-			docker.io/localstack/localstack; \
+			docker.io/localstack/localstack:community-archive; \
 		echo "Waiting for LocalStack..."; \
 		for i in $$(seq 1 30); do \
 			curl -sf http://localhost:4566/_localstack/health >/dev/null 2>&1 && break; \
