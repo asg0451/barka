@@ -1,5 +1,4 @@
 - [ ] separate producer nodes from consumer nodes entirely
-- [ ] propagate cluster info via gossip
-- [ ] store and propagate leader node id+addr via gossip
-- [ ] client produce requests route to leader
-- [ ] client consume requests load balance with stickiness on cached data
+- [ ] try and make consume as zero copy as possible, like produce
+- [ ] add support for multiple topics and partitions
+- [ ] make a more sophisticated client which can examing topic-partition leadership state to route produce requests to the appropriate node, taking expiry and retries into account.
