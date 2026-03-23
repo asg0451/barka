@@ -40,7 +40,10 @@ struct SegmentData {
   records @1 :List(Record);
 }
 
-interface BarkaSvc {
+interface ProduceSvc {
   produce @0 (request :ProduceRequest) -> (response :ProduceResponse);
-  consume @1 (request :ConsumeRequest) -> (response :ConsumeResponse);
+}
+
+interface ConsumeSvc {
+  consume @0 (request :ConsumeRequest) -> (response :ConsumeResponse);
 }

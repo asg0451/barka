@@ -317,7 +317,7 @@ async fn io_loop(
 mod tests {
     use super::*;
     use crate::log_offset::compose;
-    use crate::node::LeadershipState;
+    use crate::produce_node::LeadershipState;
     use crate::producer::PartitionProducer;
     use crate::test_util::TestMessage;
     use std::sync::Arc;

@@ -11,31 +11,34 @@ Kafka-like distributed log with an S3 backend. Ephemeral nodes coordinate partit
 ```bash
 cargo build                # build (requires `capnp` compiler installed: apt install capnproto)
 cargo check                # type-check only
-RUST_LOG=info cargo run    # start a node (capnp-rpc on :9292, Jepsen gateway on :9293)
+RUST_LOG=info cargo run --bin produce-node   # start produce node (capnp-rpc on :9292)
+RUST_LOG=info cargo run --bin consume-node   # start consume node (capnp-rpc on :9392)
+RUST_LOG=info cargo run --bin jepsen-gateway # start jepsen gateway (JSON on :9293, routes to produce :9292 + consume :9392)
 ```
 
 ### Jepsen Tests
 
 ```bash
 cd jepsen/barka
-CLASSPATH= lein run test --barka-bin /path/to/target/debug/barka
+CLASSPATH= lein run test --bin-dir /path/to/target/debug
+# or: make jepsen
 ```
 
-Jepsen runs locally (no SSH/VMs needed) — starts barka as a subprocess, sends produce/consume ops via the **Jepsen API gateway** (newline JSON over TCP), then checks queue ordering invariants. Currently expected to report `:valid? false` since the storage backend is a stub.
+Jepsen runs locally (no SSH/VMs needed) — starts produce-node, consume-node, and jepsen-gateway as subprocesses per node, sends produce/consume ops via the **Jepsen API gateway** (newline JSON over TCP), then checks queue ordering invariants.
 
 ## Architecture
 
-Two communication layers (same backend; the gateway is a frontend only):
-- **Cap'n Proto RPC** (port 9292): The real client protocol. Schema in `schema/barka.capnp`, compiled by `build.rs` with `default_parent_module(["rpc"])` so generated code lives at `crate::rpc::barka_capnp`. capnp-rpc is `!Send`, so the RPC server runs on a dedicated thread with its own single-threaded tokio runtime and `LocalSet`.
-- **Jepsen API gateway** (port 9293, env `BARKA_JEPSEN_GATEWAY_PORT`): Newline-delimited JSON over TCP for Jepsen. Implementation in `src/jepsen_gateway.rs`: translates each line to [`BarkaClient`](src/rpc/client.rs) Cap'n Proto calls to the node's RPC address (retries until the RPC listener is up). Runs on its own dedicated `current_thread` runtime + `LocalSet` for the same `!Send` reasons as the RPC server. Protocol: `{"op":"produce","topic":"...","partition":0,"value":"..."}` / `{"op":"consume","topic":"...","partition":0,"offset":0,"max":10}`.
+Three binaries, cleanly separated:
+- **`produce-node`** (`src/bin/produce-node.rs`): Leader election + produce RPC (Cap'n Proto `ProduceSvc`). Uses custom `BytesVatNetwork` for zero-copy S3 upload. Schema in `schema/barka.capnp`, compiled by `build.rs`.
+- **`consume-node`** (`src/bin/consume-node.rs`): Consume RPC (Cap'n Proto `ConsumeSvc`). Uses stock `twoparty::VatNetwork`. Reads segments from S3 with two-tier LRU cache.
+- **`jepsen-gateway`** (`src/bin/jepsen-gateway.rs`): Standalone test adapter. Newline-delimited JSON over TCP. Routes produce ops to a produce-node via `ProduceClient` and consume ops to a consume-node via `ConsumeClient`. Protocol: `{"op":"produce","topic":"...","partition":0,"value":"..."}` / `{"op":"consume","topic":"...","partition":0,"offset":0,"max":10}`.
+
+capnp-rpc is `!Send`, so RPC servers run on dedicated threads with single-threaded tokio runtimes and `LocalSet`.
 
 ### Key design decisions
-- **Storage is a black box**: `src/storage.rs` is an opaque trait — intentionally has no implementation details.
-- **Lease is a stub**: `src/lease.rs` defines the S3 lease interface (`acquire`/`heartbeat`/`release`) with `todo!()` bodies.
-- **Partitions are keyed by `(topic, partition_id)`**: The `Node.partitions` map uses `(String, u32)` as the key. Topics are created on first write.
 - **No Raft**: Leadership is S3-based leases, not consensus protocol.
 - **Reads don't require leadership**: Only produce (write) checks the leadership lease. Consume reads segments directly from S3 and can be served by any node.
-- **No wrapper structs for capnp-rpc**: `Node` implements `barka_svc::Server` directly. It holds `Arc<Mutex<...>>` internally so it's cheap to clone. `serve_rpc` takes a `Node` by value, creates one capnp client, and clones it per connection (same pattern as [queueber](https://github.com/asg0451/queueber)). Don't introduce intermediate types to bridge capnp-rpc and shared state.
+- **Separate Cap'n Proto interfaces**: `ProduceSvc` and `ConsumeSvc` are separate interfaces in the schema, each with its own server/client types. The produce path keeps the custom `BytesVatNetwork` for zero-copy; the consume path uses stock twoparty transport.
 
 ### Leader election (`src/leader_election.rs`)
 - Based on [S3 conditional writes](https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/): list lock files, check newest, `put_if_absent` with `if-none-match: *` to claim the next epoch.

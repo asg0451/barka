@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use capnp_rpc::RpcSystem;
 use capnp_rpc::rpc_twoparty_capnp;
@@ -10,13 +11,19 @@ use tokio::net::TcpListener;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info};
 
-use crate::node::Node;
-use crate::rpc::barka_capnp::barka_svc;
+use crate::consumer::PartitionConsumer;
+use crate::produce_node::LeadershipState;
+use crate::producer::PartitionProducer;
+use crate::rpc::barka_capnp::{consume_svc, produce_svc};
 use crate::rpc::bytes_transport::{BytesVatNetwork, MessageBytesQueue};
 
-pub async fn serve_rpc(node: Node, addr: SocketAddr) -> anyhow::Result<()> {
+pub async fn serve_produce_rpc(
+    producer: Arc<PartitionProducer>,
+    leadership: Arc<LeadershipState>,
+    addr: SocketAddr,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
-    info!(%addr, "capnp-rpc listening");
+    info!(%addr, "produce-rpc listening");
 
     let local = tokio::task::LocalSet::new();
     local
@@ -29,8 +36,9 @@ pub async fn serve_rpc(node: Node, addr: SocketAddr) -> anyhow::Result<()> {
                         continue;
                     }
                 };
-                info!(%remote, "capnp-rpc connection");
-                let node = node.clone();
+                info!(%remote, "produce-rpc connection");
+                let producer = Arc::clone(&producer);
+                let leadership = Arc::clone(&leadership);
 
                 tokio::task::spawn_local(async move {
                     let stream = stream.compat();
@@ -44,14 +52,15 @@ pub async fn serve_rpc(node: Node, addr: SocketAddr) -> anyhow::Result<()> {
                         Default::default(),
                         call_bytes_queue.clone(),
                     );
-                    let per_conn = PerConnectionNode {
-                        node,
+                    let per_conn = PerConnectionProduceNode {
+                        producer,
+                        leadership,
                         msg_bytes: call_bytes_queue,
                     };
-                    let client: barka_svc::Client = capnp_rpc::new_client(per_conn);
+                    let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                     let rpc = RpcSystem::new(Box::new(network), Some(client.client));
                     if let Err(e) = rpc.await {
-                        error!(%e, "rpc session error");
+                        error!(%e, "produce rpc session error");
                     }
                 });
             }
@@ -60,17 +69,17 @@ pub async fn serve_rpc(node: Node, addr: SocketAddr) -> anyhow::Result<()> {
     Ok(())
 }
 
-// TODO: revisit — coupled to bytes_transport.rs custom transport (see note there).
-struct PerConnectionNode {
-    node: Node,
+struct PerConnectionProduceNode {
+    producer: Arc<PartitionProducer>,
+    leadership: Arc<LeadershipState>,
     msg_bytes: MessageBytesQueue,
 }
 
-impl barka_svc::Server for PerConnectionNode {
+impl produce_svc::Server for PerConnectionProduceNode {
     async fn produce(
         self: Rc<Self>,
-        params: barka_svc::ProduceParams,
-        mut results: barka_svc::ProduceResults,
+        params: produce_svc::ProduceParams,
+        mut results: produce_svc::ProduceResults,
     ) -> Result<(), capnp::Error> {
         let raw = self
             .msg_bytes
@@ -80,13 +89,11 @@ impl barka_svc::Server for PerConnectionNode {
         let req = params.get()?.get_request()?;
 
         let epoch = self
-            .node
             .leadership
             .check_leader()
             .ok_or_else(|| capnp::Error::failed("not leader for partition".into()))?;
 
         let produced = self
-            .node
             .producer
             .apply_produce_request(raw, req, epoch)
             .await
@@ -101,19 +108,84 @@ impl barka_svc::Server for PerConnectionNode {
         }
         Ok(())
     }
+}
 
+pub async fn serve_consume_rpc(
+    consumer: Arc<PartitionConsumer>,
+    addr: SocketAddr,
+) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(addr).await?;
+    info!(%addr, "consume-rpc listening");
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            loop {
+                let (stream, remote) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!(%e, "accept error");
+                        continue;
+                    }
+                };
+                info!(%remote, "consume-rpc connection");
+                let consumer = Arc::clone(&consumer);
+
+                tokio::task::spawn_local(async move {
+                    let stream = stream.compat();
+                    let (reader, writer) = stream.split();
+                    let network = capnp_rpc::twoparty::VatNetwork::new(
+                        futures::io::BufReader::new(reader),
+                        futures::io::BufWriter::new(writer),
+                        rpc_twoparty_capnp::Side::Server,
+                        Default::default(),
+                    );
+                    let per_conn = PerConnectionConsumeNode { consumer };
+                    let client: consume_svc::Client = capnp_rpc::new_client(per_conn);
+                    let rpc = RpcSystem::new(Box::new(network), Some(client.client));
+                    if let Err(e) = rpc.await {
+                        error!(%e, "consume rpc session error");
+                    }
+                });
+            }
+        })
+        .await;
+    Ok(())
+}
+
+struct PerConnectionConsumeNode {
+    consumer: Arc<PartitionConsumer>,
+}
+
+impl consume_svc::Server for PerConnectionConsumeNode {
     async fn consume(
         self: Rc<Self>,
-        params: barka_svc::ConsumeParams,
-        mut results: barka_svc::ConsumeResults,
+        params: consume_svc::ConsumeParams,
+        mut results: consume_svc::ConsumeResults,
     ) -> Result<(), capnp::Error> {
-        // Pop the raw message bytes to keep the queue in sync with capnp-rpc's
-        // call sequence — the custom BytesVatNetwork pushes one entry per RPC call,
-        // and each handler must pop its own even if it doesn't need the bytes.
-        let _raw = self.msg_bytes.borrow_mut().pop_front();
         let req = params.get()?.get_request()?;
+        let _topic = req.get_topic()?.to_string()?;
+        let _partition = req.get_partition();
+        let offset = req.get_offset();
+        let max = req.get_max_records();
+
+        let records = self
+            .consumer
+            .consume(offset, max)
+            .await
+            .map_err(|e| capnp::Error::failed(e.to_string()))?;
+
         let resp = results.get().get_response()?;
-        self.node.apply_consume_request(req, resp).await?;
+        let mut list = resp.init_records(records.len() as u32);
+        for (i, rec) in records.iter().enumerate() {
+            let mut entry = list.reborrow().get(i as u32);
+            if !rec.key.is_empty() {
+                entry.set_key(&rec.key);
+            }
+            entry.set_value(&rec.value);
+            entry.set_offset(rec.offset);
+            entry.set_timestamp(rec.timestamp);
+        }
         Ok(())
     }
 }
@@ -125,56 +197,106 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::consumer::{ConsumerConfig, PartitionConsumer};
     use crate::log_offset::compose;
-    use crate::node::{Node, NodeConfig, ProducerBatchLimits};
+    use crate::node::segment_key_prefix;
+    use crate::produce_node::{LeadershipState, ProducerBatchLimits};
     use crate::producer;
-    use crate::rpc::client::BarkaClient;
+    use crate::rpc::client::{ConsumeClient, ProduceClient};
     use crate::s3::S3Config;
+
+    fn test_s3_config(bucket: &str) -> S3Config {
+        S3Config {
+            endpoint_url: Some("http://localhost:4566".to_string()),
+            bucket: bucket.into(),
+            region: "us-east-1".into(),
+        }
+    }
+
+    fn unique_prefix(label: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        format!("{label}/{nanos}")
+    }
+
+    async fn make_produce_parts(
+        s3_config: &S3Config,
+        s3_prefix: &str,
+        limits: Option<ProducerBatchLimits>,
+    ) -> (Arc<PartitionProducer>, Arc<LeadershipState>) {
+        let prefix = segment_key_prefix(Some(s3_prefix));
+        let partition_prefix = format!("{prefix}/test/0");
+        let leadership = Arc::new(LeadershipState::new());
+        let producer = match limits {
+            Some(l) => PartitionProducer::with_opts(
+                s3_config,
+                partition_prefix,
+                l.max_records,
+                l.max_bytes,
+                l.linger(),
+                Arc::clone(&leadership),
+            )
+            .await
+            .unwrap(),
+            None => PartitionProducer::new(s3_config, partition_prefix, Arc::clone(&leadership))
+                .await
+                .unwrap(),
+        };
+        (producer, leadership)
+    }
+
+    async fn make_consume_parts(s3_config: &S3Config, s3_prefix: &str) -> Arc<PartitionConsumer> {
+        let prefix = segment_key_prefix(Some(s3_prefix));
+        let partition_prefix = format!("{prefix}/test/0");
+        let cache_dir = std::env::temp_dir()
+            .join("barka-segment-cache")
+            .join(partition_prefix.replace('/', "-"));
+        PartitionConsumer::new(
+            s3_config,
+            partition_prefix,
+            ConsumerConfig {
+                cache_dir,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
 
     static STRESS_BUCKET_SEQ: AtomicU64 = AtomicU64::new(0);
 
     #[tokio::test(flavor = "multi_thread")]
     async fn rpc_produce_consume_round_trip() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+        let produce_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let produce_addr = produce_listener.local_addr().unwrap();
+        let consume_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let consume_addr = consume_listener.local_addr().unwrap();
 
-        let s3_config = S3Config {
-            endpoint_url: Some("http://localhost:4566".to_string()),
-            bucket: "test-rpc".into(),
-            region: "us-east-1".into(),
-        };
+        let s3_config = test_s3_config("test-rpc");
         let s3_client = crate::s3::build_client(&s3_config).await;
         crate::s3::ensure_bucket(&s3_client, &s3_config.bucket)
             .await
             .unwrap();
 
-        let node = Node::new(
-            NodeConfig {
-                rpc_addr: addr,
-                s3_prefix: Some(format!(
-                    "rpc-round-trip/{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
-                )),
-                // max_records=2 so the first produce (2 records) flushes immediately;
-                // the second (1 record) flushes on the 100ms linger timer.
-                producer_limits: Some(ProducerBatchLimits {
-                    max_records: 2,
-                    max_bytes: 1024 * 1024,
-                    linger_ms: 100,
-                }),
-                ..Default::default()
-            },
+        let s3_prefix = unique_prefix("rpc-round-trip");
+        let (producer, leadership) = make_produce_parts(
             &s3_config,
+            &s3_prefix,
+            Some(ProducerBatchLimits {
+                max_records: 2,
+                max_bytes: 1024 * 1024,
+                linger_ms: 100,
+            }),
         )
-        .await
-        .unwrap();
-        node.leadership.set_leader(u64::MAX, 0);
+        .await;
+        leadership.set_leader(u64::MAX, 0);
+        let consumer = make_consume_parts(&s3_config, &s3_prefix).await;
 
-        let server_node = node.clone();
-        let server = tokio::task::spawn_blocking(move || {
+        let p = Arc::clone(&producer);
+        let l = Arc::clone(&leadership);
+        let produce_server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -183,7 +305,7 @@ mod tests {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async {
-                        let (stream, _) = listener.accept().await.unwrap();
+                        let (stream, _) = produce_listener.accept().await.unwrap();
                         let stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
                         let (reader, writer) = futures::AsyncReadExt::split(stream);
                         let call_bytes_queue: MessageBytesQueue =
@@ -195,11 +317,40 @@ mod tests {
                             Default::default(),
                             call_bytes_queue.clone(),
                         );
-                        let per_conn = PerConnectionNode {
-                            node: server_node,
+                        let per_conn = PerConnectionProduceNode {
+                            producer: p,
+                            leadership: l,
                             msg_bytes: call_bytes_queue,
                         };
-                        let client: barka_svc::Client = capnp_rpc::new_client(per_conn);
+                        let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
+                        let rpc = RpcSystem::new(Box::new(network), Some(client.client));
+                        rpc.await.unwrap();
+                    })
+                    .await;
+            });
+        });
+
+        let c = Arc::clone(&consumer);
+        let consume_server = tokio::task::spawn_blocking(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let local = tokio::task::LocalSet::new();
+                local
+                    .run_until(async {
+                        let (stream, _) = consume_listener.accept().await.unwrap();
+                        let stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
+                        let (reader, writer) = futures::AsyncReadExt::split(stream);
+                        let network = capnp_rpc::twoparty::VatNetwork::new(
+                            futures::io::BufReader::new(reader),
+                            futures::io::BufWriter::new(writer),
+                            rpc_twoparty_capnp::Side::Server,
+                            Default::default(),
+                        );
+                        let per_conn = PerConnectionConsumeNode { consumer: c };
+                        let client: consume_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));
                         rpc.await.unwrap();
                     })
@@ -216,10 +367,10 @@ mod tests {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async {
-                        let client = BarkaClient::connect(addr).await.unwrap();
+                        let produce_client = ProduceClient::connect(produce_addr).await.unwrap();
+                        let consume_client = ConsumeClient::connect(consume_addr).await.unwrap();
 
-                        // First produce: 2 records → segment 0, intra [0,1]
-                        let recs = client
+                        let recs = produce_client
                             .produce("test-topic", 0, vec![b"hello".to_vec(), b"world".to_vec()])
                             .await
                             .unwrap();
@@ -229,8 +380,7 @@ mod tests {
                         assert_eq!(recs[1].offset, compose(0, 1));
                         assert_eq!(recs[1].value, b"world");
 
-                        // Second produce: 1 record → segment 1, intra [0]
-                        let recs2 = client
+                        let recs2 = produce_client
                             .produce("test-topic", 0, vec![b"third".to_vec()])
                             .await
                             .unwrap();
@@ -238,8 +388,7 @@ mod tests {
                         assert_eq!(recs2[0].offset, compose(1, 0));
                         assert_eq!(recs2[0].value, b"third");
 
-                        // Consume from segment 0: should return "hello", "world"
-                        let consumed = client
+                        let consumed = consume_client
                             .consume("test-topic", 0, compose(0, 0), 10)
                             .await
                             .unwrap();
@@ -255,8 +404,7 @@ mod tests {
                         assert_eq!(consumed[2].value, b"third");
                         assert_eq!(consumed[2].offset, compose(1, 0));
 
-                        // Consume from mid-segment offset
-                        let consumed2 = client
+                        let consumed2 = consume_client
                             .consume("test-topic", 0, compose(0, 1), 10)
                             .await
                             .unwrap();
@@ -264,16 +412,14 @@ mod tests {
                         assert_eq!(consumed2[0].value, b"world");
                         assert_eq!(consumed2[1].value, b"third");
 
-                        // Consume from segment 1 only
-                        let consumed3 = client
+                        let consumed3 = consume_client
                             .consume("test-topic", 0, compose(1, 0), 10)
                             .await
                             .unwrap();
                         assert_eq!(consumed3.len(), 1);
                         assert_eq!(consumed3[0].value, b"third");
 
-                        // Consume past all data — should be empty
-                        let consumed4 = client
+                        let consumed4 = consume_client
                             .consume("test-topic", 0, compose(2, 0), 10)
                             .await
                             .unwrap();
@@ -283,13 +429,12 @@ mod tests {
             });
         });
 
-        let (c, s) = tokio::join!(client, server);
+        let (c, ps, cs) = tokio::join!(client, produce_server, consume_server);
         c.unwrap();
-        s.unwrap();
+        ps.unwrap();
+        cs.unwrap();
     }
 
-    /// `Node` with `producer_limits: None` must use library defaults (100k records / 100 MiB cap).
-    /// A single produce larger than the stress-test override (100) is rejected if defaults regress.
     #[tokio::test(flavor = "multi_thread")]
     async fn e2e_default_producer_limits_single_large_produce() {
         const N: usize = 101;
@@ -298,40 +443,18 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let s3_config = S3Config {
-            endpoint_url: Some("http://localhost:4566".to_string()),
-            bucket: "test-rpc".into(),
-            region: "us-east-1".into(),
-        };
+        let s3_config = test_s3_config("test-rpc");
         let s3_client = crate::s3::build_client(&s3_config).await;
         crate::s3::ensure_bucket(&s3_client, &s3_config.bucket)
             .await
             .unwrap();
 
-        let node = Node::new(
-            NodeConfig {
-                rpc_addr: addr,
-                s3_prefix: Some(format!(
-                    "rpc-default-limits/{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
-                )),
-                producer_limits: None,
-                ..Default::default()
-            },
-            &s3_config,
-        )
-        .await
-        .unwrap();
-        node.leadership.set_leader(u64::MAX, 0);
-        assert!(
-            node.config.producer_limits.is_none(),
-            "e2e expects real PartitionProducer::new defaults"
-        );
+        let (producer, leadership) =
+            make_produce_parts(&s3_config, &unique_prefix("rpc-default-limits"), None).await;
+        leadership.set_leader(u64::MAX, 0);
 
-        let server_node = node.clone();
+        let p = Arc::clone(&producer);
+        let l = Arc::clone(&leadership);
         let server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -353,11 +476,12 @@ mod tests {
                             Default::default(),
                             call_bytes_queue.clone(),
                         );
-                        let per_conn = PerConnectionNode {
-                            node: server_node,
+                        let per_conn = PerConnectionProduceNode {
+                            producer: p,
+                            leadership: l,
                             msg_bytes: call_bytes_queue,
                         };
-                        let client: barka_svc::Client = capnp_rpc::new_client(per_conn);
+                        let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));
                         rpc.await.unwrap();
                     })
@@ -374,7 +498,7 @@ mod tests {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async {
-                        let client = BarkaClient::connect(addr).await.unwrap();
+                        let client = ProduceClient::connect(addr).await.unwrap();
                         let values: Vec<Vec<u8>> =
                             (0..N).map(|i| format!("rec-{i}").into_bytes()).collect();
                         let recs = client
@@ -396,8 +520,6 @@ mod tests {
         s.unwrap();
     }
 
-    /// Several concurrent RPC clients, each producing in batches for a few seconds on its own
-    /// topic, then consuming back and checking offsets and payloads. Requires LocalStack S3.
     #[tokio::test(flavor = "multi_thread")]
     async fn rpc_produce_consume_load_stress() {
         const NUM_CLIENTS: usize = 6;
@@ -413,43 +535,26 @@ mod tests {
             "test-rpc-stress-{}",
             STRESS_BUCKET_SEQ.fetch_add(1, Ordering::Relaxed)
         );
-        let s3_config = S3Config {
-            endpoint_url: Some("http://localhost:4566".to_string()),
-            bucket: bucket.clone(),
-            region: "us-east-1".into(),
-        };
+        let s3_config = test_s3_config(&bucket);
         let s3_client = crate::s3::build_client(&s3_config).await;
         crate::s3::ensure_bucket(&s3_client, &s3_config.bucket)
             .await
             .unwrap();
 
-        // Tight batch limits so flushes trigger without waiting on the 1s linger timer
-        // (production defaults are 100k records / 100 MiB).
-        let node = Node::new(
-            NodeConfig {
-                rpc_addr: addr,
-                s3_prefix: Some(format!(
-                    "rpc-stress/{}/{}",
-                    bucket,
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
-                )),
-                producer_limits: Some(ProducerBatchLimits {
-                    max_records: 100,
-                    max_bytes: 1024 * 1024,
-                    linger_ms: 1000,
-                }),
-                ..Default::default()
-            },
+        let (producer, leadership) = make_produce_parts(
             &s3_config,
+            &unique_prefix(&format!("rpc-stress/{bucket}")),
+            Some(ProducerBatchLimits {
+                max_records: 100,
+                max_bytes: 1024 * 1024,
+                linger_ms: 1000,
+            }),
         )
-        .await
-        .unwrap();
-        node.leadership.set_leader(u64::MAX, 0);
+        .await;
+        leadership.set_leader(u64::MAX, 0);
 
-        let server_node = node.clone();
+        let p = Arc::clone(&producer);
+        let l = Arc::clone(&leadership);
         let server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -480,11 +585,12 @@ mod tests {
                                         Default::default(),
                                         call_bytes_queue.clone(),
                                     );
-                                    let per_conn = PerConnectionNode {
-                                        node: server_node.clone(),
+                                    let per_conn = PerConnectionProduceNode {
+                                        producer: Arc::clone(&p),
+                                        leadership: Arc::clone(&l),
                                         msg_bytes: call_bytes_queue,
                                     };
-                                    let client: barka_svc::Client = capnp_rpc::new_client(per_conn);
+                                    let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                                     let rpc = RpcSystem::new(Box::new(network), Some(client.client));
                                     tokio::task::spawn_local(async move {
                                         let _ = rpc.await;
@@ -510,7 +616,7 @@ mod tests {
                     let local = tokio::task::LocalSet::new();
                     local
                         .run_until(async {
-                            let client = BarkaClient::connect(addr).await.unwrap();
+                            let client = ProduceClient::connect(addr).await.unwrap();
                             let topic = format!("load-stress-{client_id}");
                             let deadline = Instant::now() + Duration::from_secs(RUN_SECS);
                             let mut produce_count: u64 = 0;
@@ -565,35 +671,19 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let s3_config = S3Config {
-            endpoint_url: Some("http://localhost:4566".to_string()),
-            bucket: "test-rpc".into(),
-            region: "us-east-1".into(),
-        };
+        let s3_config = test_s3_config("test-rpc");
         let s3_client = crate::s3::build_client(&s3_config).await;
         crate::s3::ensure_bucket(&s3_client, &s3_config.bucket)
             .await
             .unwrap();
 
-        let node = Node::new(
-            NodeConfig {
-                rpc_addr: addr,
-                s3_prefix: Some(format!(
-                    "rpc-not-leader/{}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_nanos()
-                )),
-                ..Default::default()
-            },
-            &s3_config,
-        )
-        .await
-        .unwrap();
+        let (producer, _leadership) =
+            make_produce_parts(&s3_config, &unique_prefix("rpc-not-leader"), None).await;
         // Deliberately NOT calling set_leader — node should reject produce.
+        let leadership = Arc::new(LeadershipState::new());
 
-        let server_node = node.clone();
+        let p = Arc::clone(&producer);
+        let l = Arc::clone(&leadership);
         let server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -615,11 +705,12 @@ mod tests {
                             Default::default(),
                             call_bytes_queue.clone(),
                         );
-                        let per_conn = PerConnectionNode {
-                            node: server_node,
+                        let per_conn = PerConnectionProduceNode {
+                            producer: p,
+                            leadership: l,
                             msg_bytes: call_bytes_queue,
                         };
-                        let client: barka_svc::Client = capnp_rpc::new_client(per_conn);
+                        let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));
                         rpc.await.unwrap();
                     })
@@ -636,7 +727,7 @@ mod tests {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async {
-                        let client = BarkaClient::connect(addr).await.unwrap();
+                        let client = ProduceClient::connect(addr).await.unwrap();
                         let err = client
                             .produce("test-topic", 0, vec![b"should-fail".to_vec()])
                             .await

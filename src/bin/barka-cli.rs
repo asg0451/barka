@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result, bail};
 use barka::log_offset::format_decomposed;
-use barka::rpc::client::BarkaClient;
+use barka::rpc::client::{ConsumeClient, ProduceClient};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -15,7 +15,10 @@ use clap::Parser;
 #[group(id = "mode", required = true, args = ["produce", "consume"])]
 struct Cli {
     #[arg(long, default_value = "127.0.0.1:9292")]
-    addr: SocketAddr,
+    produce_addr: SocketAddr,
+
+    #[arg(long, default_value = "127.0.0.1:9392")]
+    consume_addr: SocketAddr,
 
     #[arg(long, conflicts_with = "consume")]
     produce: bool,
@@ -80,11 +83,10 @@ fn main() -> Result<()> {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let client = BarkaClient::connect(cli.addr)
-                    .await
-                    .with_context(|| format!("connect {}", cli.addr))?;
-
                 if cli.produce {
+                    let client = ProduceClient::connect(cli.produce_addr)
+                        .await
+                        .with_context(|| format!("connect {}", cli.produce_addr))?;
                     let values = collect_produce_values(&cli)?;
                     let records = client
                         .produce(&cli.topic, cli.partition, values)
@@ -110,6 +112,9 @@ fn main() -> Result<()> {
                     return Ok(());
                 }
 
+                let client = ConsumeClient::connect(cli.consume_addr)
+                    .await
+                    .with_context(|| format!("connect {}", cli.consume_addr))?;
                 let records = client
                     .consume(&cli.topic, cli.partition, cli.offset, cli.max)
                     .await

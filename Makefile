@@ -42,7 +42,7 @@ NODES ?= 1
 
 jepsen: build localstack
 	cd jepsen/barka && CLASSPATH= lein run test \
-		--barka-bin $(CURDIR)/target/debug/barka \
+		--bin-dir $(CURDIR)/target/debug \
 		--num-nodes $(NODES)
 
 brew-install-lein:

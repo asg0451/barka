@@ -130,8 +130,7 @@
             :ssh            {:dummy? true}})))
 
 (def cli-opts
-  [[nil "--barka-bin PATH" "Path to barka binary"
-    :default "barka"]
+  [[nil "--bin-dir DIR" "Directory containing produce-node, consume-node, jepsen-gateway binaries (default: bare names on PATH)"]
    [nil "--num-nodes NUM" "Number of barka nodes"
     :default 1
     :parse-fn parse-long
