@@ -51,6 +51,13 @@ Land changes on GitHub with a PR and **do not stop until CI succeeds and the Cla
   - Latest workflow run: `gh run list --branch "$(git branch --show-current)" --limit 1` then `gh run watch <RUN_ID>`.
   - Logs on failure: `gh run view <RUN_ID> --log-failed`.
 
+**If CI never starts, stays empty, or `--watch` waits with no runs:** GitHub often does not run required checks when the PR cannot be merged into the base because of **merge conflicts**.
+
+1. Check merge state: `gh pr view --json mergeable,mergeStateStatus` (or open the PR — look for “Merge conflict” / unmergeable).
+2. If conflicts (or `mergeable` is `CONFLICTING`): `git fetch origin`, then bring the default branch into your branch — e.g. `git merge origin/master` or `git merge origin/main` (use whichever is this repo’s default; `gh repo view --json defaultBranchRef -q .defaultBranchRef.name` if unsure).
+3. Resolve conflicts, run the same local preflight the project expects (see step 1), then `git add` → `git commit` (merge commit is fine) → `git push`.
+4. Return to **Watch CI** above and continue the full loop (green CI → Claude review, etc.).
+
 ### 6. If CI fails — iterate
 
 1. Read failed step logs (`gh run view`, job URL from `gh pr checks`, or Actions web UI).
@@ -86,9 +93,9 @@ After the action completes, read what Claude posted:
 1. **PR-level comments** (top-level review feedback):
    `gh pr view "$PR" --comments`
 2. **Inline review comments** (code-specific findings):
-   `gh api -H "Accept: application/vnd.github+json" repos/{owner}/{repo}/pulls/{PR}/comments`
+   From repo root: `./scripts/gh-pr-review-comments.sh` (optional PR number as first arg; defaults to PR for the current branch). Prefer this over inlining `gh api` so tool permission can target the script.
 3. **Review threads** (to see unresolved items):
-   Use the GraphQL query from the workflow to list unresolved review threads, or simply read through the comments from steps 1-2.
+   From repo root: `./scripts/gh-pr-review-threads.sh` (optional PR number; defaults to current branch). Matches the review-thread query described in `.github/workflows/claude.yml`. Filter the JSON for `isResolved: false` and `github-actions[bot]` as needed, or rely on steps 1–2 if that is enough.
 
 Focus on **unresolved** findings from `github-actions[bot]` (that is the Claude action's identity).
 
@@ -115,7 +122,7 @@ If a finding is a false positive or a style disagreement you want to skip, note 
 - **No `gh`**: use `git push` and open the compare URL Git prints; poll CI in the browser or install `gh`.
 - **Draft PR**: `gh pr create --draft` if the user wants draft first; still run `--watch` when aiming for green.
 - **Force-push**: only if the user explicitly wants history rewritten (`git push --force-with-lease` after rebase/amend).
-- **Merge conflicts with base**: rebase or merge `main`/`master` as the project prefers, then push and re-watch CI.
+- **Merge conflicts with base**: same as **If CI never starts** under step 5 — conflicts block merges and often block CI; merge/rebase default branch, fix, push, then re-watch CI.
 - **Claude action not set up**: if `.github/workflows/claude.yml` does not exist or the comment does not trigger a run, skip the review steps and inform the user.
 - **Claude review loops endlessly**: if the same finding keeps reappearing after a fix, stop and surface it to the user — don't loop more than 3 rounds without human input.
 
