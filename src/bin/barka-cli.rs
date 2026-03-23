@@ -228,9 +228,7 @@ async fn topic_describe(
     partitions.sort_by_key(|e| e.partition);
 
     if partitions.is_empty() {
-        if json {
-            println!("[]");
-        } else {
+        if !json {
             println!("No partitions registered for topic '{topic}'.");
         }
         return Ok(());
