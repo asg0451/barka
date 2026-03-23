@@ -56,6 +56,10 @@ struct Cli {
     /// AWS region for S3.
     #[arg(long, default_value = "us-east-1")]
     aws_region: String,
+
+    /// S3 key prefix for leader election lock files.
+    #[arg(long)]
+    leader_election_prefix: Option<String>,
 }
 
 fn collect_produce_values(cli: &Cli) -> Result<Vec<Vec<u8>>> {
@@ -102,7 +106,7 @@ fn main() -> Result<()> {
                         region: cli.aws_region.clone(),
                     };
                     let mut router =
-                        barka::produce_router::ProduceRouter::new(&s3_config, None).await;
+                        barka::produce_router::ProduceRouter::new(&s3_config, cli.leader_election_prefix.clone()).await;
                     let records = router
                         .produce(&cli.topic, cli.partition, values)
                         .await
