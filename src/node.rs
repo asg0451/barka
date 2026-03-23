@@ -175,7 +175,7 @@ impl Node {
                     l.max_records,
                     l.max_bytes,
                     l.linger(),
-                    Some(Arc::clone(&leadership)),
+                    Arc::clone(&leadership),
                 )
                 .await?
             }
@@ -183,7 +183,7 @@ impl Node {
                 PartitionProducer::new(
                     s3_config,
                     partition_prefix.clone(),
-                    Some(Arc::clone(&leadership)),
+                    Arc::clone(&leadership),
                 )
                 .await?
             }
