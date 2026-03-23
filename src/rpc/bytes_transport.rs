@@ -141,6 +141,7 @@ fn peek_rpc_message_discriminant(bytes: &[u8]) -> Option<u16> {
         return None; // not a struct pointer
     }
 
+    // Extract signed 30-bit word-offset (bits 2..31) from the struct pointer.
     let offset_words = ((ptr as u32) as i32) >> 2;
     let data_off = (table_bytes as isize) + 8 + (offset_words as isize) * 8;
     if data_off < 0 {
