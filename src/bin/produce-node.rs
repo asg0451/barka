@@ -70,6 +70,10 @@ struct Cli {
     #[arg(long, env = "BARKA_LEADER_ELECTION_POLL_SECS", default_value_t = 3)]
     leader_election_poll_secs: u64,
 
+    /// Path segment in S3 before `lock/` and the topic-partition namespace (e.g. cluster or environment).
+    #[arg(long, env = "BARKA_LEADER_ELECTION_PREFIX")]
+    leader_election_prefix: Option<String>,
+
     /// Topic configuration: TOPIC:NUM_PARTITIONS[,TOPIC:NUM_PARTITIONS,...]
     #[arg(long, env = "BARKA_TOPICS", default_value = "default:1", value_parser = parse_topics)]
     topics: Vec<TopicConfig>,
@@ -101,6 +105,7 @@ impl Cli {
             s3_prefix: self.s3_prefix.clone(),
             producer_limits,
             leader_election_poll_secs: self.leader_election_poll_secs,
+            leader_election_prefix: self.leader_election_prefix.clone(),
             topics: self.topics.clone(),
         }
     }
