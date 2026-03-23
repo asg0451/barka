@@ -1,5 +1,9 @@
 # Lessons
 
+## Read AGENTS.md and CLAUDE.md before coding
+
+`AGENTS.md` points at `CLAUDE.md`. Don't rely on memory or grep alone for architecture, test setup, or workflow—open them at the start of a session or task so global Cursor rules and repo docs stay aligned.
+
 ## Don't skip LocalStack tests
 
 The LocalStack-dependent tests in this repo are the core test suite, not optional integration tests. Don't filter them out with `--skip`. If LocalStack is expected to be running (and it is for this project), run the full suite.
