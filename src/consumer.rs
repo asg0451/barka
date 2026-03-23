@@ -247,10 +247,10 @@ impl IoState {
             debug!(seg_seq, raw_len, "caching in disk tier");
             let path = self.config.cache_dir.join(format!("{:020}.dat", seg_seq));
             tokio::fs::write(&path, &buf).await?;
-            if let Some((_evicted_seq, evicted_path)) = self.disk_cache.push(seg_seq, path) {
-                if let Err(e) = tokio::fs::remove_file(&evicted_path).await {
-                    warn!(path = %evicted_path.display(), error = %e, "failed to remove evicted segment file");
-                }
+            if let Some((_evicted_seq, evicted_path)) = self.disk_cache.push(seg_seq, path)
+                && let Err(e) = tokio::fs::remove_file(&evicted_path).await
+            {
+                warn!(path = %evicted_path.display(), error = %e, "failed to remove evicted segment file");
             }
             // Also keep decoded records in memory for the immediate consumer response
             self.mem_cache.push(seg_seq, Arc::clone(&records));
