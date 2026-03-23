@@ -327,7 +327,7 @@ mod tests {
             }
             _ => panic!(
                 "LocalStack not reachable at {LOCALSTACK_ENDPOINT}. \
-                 Start it with: docker run -d -p 4566:4566 localstack/localstack"
+                 Start it with: docker run -d -p 4566:4566 localstack/localstack:community-archive"
             ),
         }
     }
