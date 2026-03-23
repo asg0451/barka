@@ -56,7 +56,10 @@ mod tests {
 
     #[test]
     fn partition_data_prefix_basic() {
-        assert_eq!(partition_data_prefix("pfx/data", "events", 3), "pfx/data/events/3");
+        assert_eq!(
+            partition_data_prefix("pfx/data", "events", 3),
+            "pfx/data/events/3"
+        );
     }
 
     #[test]

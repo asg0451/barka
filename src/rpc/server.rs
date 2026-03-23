@@ -20,10 +20,7 @@ use crate::s3::S3Config;
 
 type ConsumerMap = Rc<RefCell<HashMap<(String, u32), Arc<PartitionConsumer>>>>;
 
-pub async fn serve_produce_rpc(
-    partitions: PartitionMap,
-    addr: SocketAddr,
-) -> anyhow::Result<()> {
+pub async fn serve_produce_rpc(partitions: PartitionMap, addr: SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "produce-rpc listening");
 

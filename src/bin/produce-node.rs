@@ -14,9 +14,9 @@ fn parse_topics(s: &str) -> Result<Vec<TopicConfig>, String> {
         if entry.is_empty() {
             continue;
         }
-        let (topic, count) = entry
-            .rsplit_once(':')
-            .ok_or_else(|| format!("invalid topic spec '{entry}', expected TOPIC:NUM_PARTITIONS"))?;
+        let (topic, count) = entry.rsplit_once(':').ok_or_else(|| {
+            format!("invalid topic spec '{entry}', expected TOPIC:NUM_PARTITIONS")
+        })?;
         let partitions: u32 = count
             .parse()
             .map_err(|_| format!("invalid partition count '{count}' in '{entry}'"))?;

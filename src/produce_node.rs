@@ -154,9 +154,7 @@ impl ProduceNode {
                         )
                         .await?
                     }
-                    None => {
-                        PartitionProducer::new(s3_config, pp, Arc::clone(&leadership)).await?
-                    }
+                    None => PartitionProducer::new(s3_config, pp, Arc::clone(&leadership)).await?,
                 };
                 tracing::info!(
                     topic = %tc.topic,
@@ -206,7 +204,9 @@ impl ProduceNode {
             .await;
             let leadership = Arc::clone(&state.leadership);
             let producer = Arc::clone(&state.producer);
-            leader_handles.push(tokio::spawn(run_leader_loop(le, leadership, producer, poll)));
+            leader_handles.push(tokio::spawn(run_leader_loop(
+                le, leadership, producer, poll,
+            )));
         }
 
         tokio::select! {
