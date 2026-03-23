@@ -23,7 +23,12 @@
       "Bash(podman info:*)",
       "Bash(make localstack:*)",
       "Bash(cargo test:*)",
-      "Bash(cargo fmt:*)"
+      "Bash(cargo fmt:*)",
+      "Bash(gh run:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(git -C /Users/miles/proj/barka add src/producer.rs src/node.rs)",
+      "Bash(git -C:*)",
+      "Bash(git -C /Users/miles/proj/barka push)"
     ]
   }
 }

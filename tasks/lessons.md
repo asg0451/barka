@@ -19,3 +19,7 @@ The task isn't just "write the code." It includes: branch, implement, test, comm
 ## Think through concurrency invariants before implementing
 
 When adding epoch/leadership gating, consider what happens to in-flight work when state changes. Don't just gate the entry point — ensure the invariant holds through the entire operation (accept → batch → flush → S3 write).
+
+## Run clippy before pushing
+
+CI runs `cargo clippy -- -D warnings`. Run it locally before committing to avoid a round-trip failure.
