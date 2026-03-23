@@ -487,50 +487,10 @@ impl PartitionProducer {
 mod tests {
     use super::*;
     use crate::log_offset::compose;
+    use crate::test_util::TestMessage;
     use std::sync::atomic::AtomicU32;
 
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    /// Holds a `Bytes`-backed capnp message reader, keeping the parsed segments
-    /// alive so we can borrow a `produce_request::Reader` from it.
-    struct TestMessage {
-        bytes: Bytes,
-        reader: capnp::message::Reader<capnp::serialize::BufferSegments<Bytes>>,
-    }
-
-    impl TestMessage {
-        fn new(n_records: usize, value_size: usize) -> Self {
-            let mut builder = capnp::message::Builder::new_default();
-            {
-                let mut req = builder.init_root::<produce_request::Builder>();
-                req.set_topic("test");
-                req.set_partition(0);
-                let mut records = req.init_records(n_records as u32);
-                for i in 0..n_records {
-                    let mut r = records.reborrow().get(i as u32);
-                    r.set_key(format!("k{i}").as_bytes());
-                    r.set_value(&vec![b'x'; value_size]);
-                    r.set_timestamp(i as i64);
-                }
-            }
-            let words = capnp::serialize::write_message_to_words(&builder);
-            let bytes = Bytes::from(words);
-            let segments =
-                capnp::serialize::BufferSegments::new(bytes.clone(), Default::default()).unwrap();
-            let reader = capnp::message::Reader::new(segments, Default::default());
-            Self { bytes, reader }
-        }
-
-        fn bytes(&self) -> &Bytes {
-            &self.bytes
-        }
-
-        fn request(&self) -> produce_request::Reader<'_> {
-            self.reader
-                .get_root::<produce_request::Reader<'_>>()
-                .unwrap()
-        }
-    }
 
     async fn test_producer(max_records: usize, max_bytes: usize) -> PartitionProducer {
         let config = S3Config {
@@ -577,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn batch_full_flushes_immediately() {
         let producer = test_producer(3, 1024 * 1024).await;
-        let msg = TestMessage::new(3, 10);
+        let msg = TestMessage::with_value_size(3, 10);
         let produced = producer
             .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
@@ -602,7 +562,7 @@ mod tests {
     async fn segment_epoch_on_producer_is_written() {
         // max_records = 1 so a single-record request fills the batch (tests skip spawn_flush_timer).
         let producer = test_producer(1, 1024 * 1024).await;
-        let msg = TestMessage::new(1, 4);
+        let msg = TestMessage::with_value_size(1, 4);
         producer
             .apply_produce_request(msg.bytes().clone(), msg.request(), 99)
             .await
@@ -633,7 +593,7 @@ mod tests {
     #[tokio::test]
     async fn produce_request_over_max_records_is_rejected() {
         let producer = test_producer(3, 1024 * 1024).await;
-        let msg = TestMessage::new(5, 10);
+        let msg = TestMessage::with_value_size(5, 10);
         let err = producer
             .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
@@ -647,7 +607,7 @@ mod tests {
     #[tokio::test]
     async fn produce_request_over_max_bytes_is_rejected() {
         let producer = test_producer(100, 256).await;
-        let msg = TestMessage::new(1, 200);
+        let msg = TestMessage::with_value_size(1, 200);
         let err = producer
             .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
@@ -661,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_flush_unblocks_pending() {
         let producer = test_producer(5, 1024 * 1024).await;
-        let msg = TestMessage::new(3, 10);
+        let msg = TestMessage::with_value_size(3, 10);
         let (a, b) = tokio::join!(
             producer.apply_produce_request(msg.bytes().clone(), msg.request(), 0),
             producer.flush(),
@@ -687,8 +647,8 @@ mod tests {
     async fn later_request_flushes_earlier_waiter() {
         let producer = test_producer(3, 1024 * 1024).await;
 
-        let m1 = TestMessage::new(2, 10);
-        let m2 = TestMessage::new(2, 10);
+        let m1 = TestMessage::with_value_size(2, 10);
+        let m2 = TestMessage::with_value_size(2, 10);
 
         let (a, b) = tokio::join!(
             producer.apply_produce_request(m1.bytes().clone(), m1.request(), 0),
@@ -711,7 +671,7 @@ mod tests {
     async fn sequence_increments_across_flushes() {
         let producer = test_producer(2, 1024 * 1024).await;
 
-        let m1 = TestMessage::new(2, 10);
+        let m1 = TestMessage::with_value_size(2, 10);
         let p0 = producer
             .apply_produce_request(m1.bytes().clone(), m1.request(), 0)
             .await
@@ -720,7 +680,7 @@ mod tests {
         assert_eq!(p0[0].offset, compose(0, 0));
         assert_eq!(p0[1].offset, compose(0, 1));
 
-        let m2 = TestMessage::new(2, 10);
+        let m2 = TestMessage::with_value_size(2, 10);
         let p1 = producer
             .apply_produce_request(m2.bytes().clone(), m2.request(), 0)
             .await
@@ -748,7 +708,7 @@ mod tests {
     #[tokio::test]
     async fn empty_request_resolves_immediately() {
         let producer = test_producer(5, 1024 * 1024).await;
-        let msg = TestMessage::new(0, 0);
+        let msg = TestMessage::with_value_size(0, 0);
         producer
             .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
@@ -763,7 +723,7 @@ mod tests {
             .unwrap()
             .as_millis() as i64;
 
-        let msg = TestMessage::new(2, 4);
+        let msg = TestMessage::with_value_size(2, 4);
         let produced = producer
             .apply_produce_request(msg.bytes().clone(), msg.request(), 0)
             .await
@@ -833,7 +793,7 @@ mod tests {
         // Revoke leadership before produce — flush should fail
         leadership.set_not_leader();
 
-        let msg = TestMessage::new(1, 4);
+        let msg = TestMessage::with_value_size(1, 4);
         let err = producer
             .apply_produce_request(msg.bytes().clone(), msg.request(), 1)
             .await
@@ -880,7 +840,7 @@ mod tests {
             leadership: Some(Arc::clone(&leadership)),
         });
 
-        let msg = TestMessage::new(1, 4);
+        let msg = TestMessage::with_value_size(1, 4);
         let p = Arc::clone(&producer);
         let (produce_result, _) = tokio::join!(
             p.apply_produce_request(msg.bytes().clone(), msg.request(), 1),

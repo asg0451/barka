@@ -34,6 +34,7 @@ Two communication layers (same backend; the gateway is a frontend only):
 - **Lease is a stub**: `src/lease.rs` defines the S3 lease interface (`acquire`/`heartbeat`/`release`) with `todo!()` bodies.
 - **Partitions are keyed by `(topic, partition_id)`**: The `Node.partitions` map uses `(String, u32)` as the key. Topics are created on first write.
 - **No Raft**: Leadership is S3-based leases, not consensus protocol.
+- **Reads don't require leadership**: Only produce (write) checks the leadership lease. Consume reads segments directly from S3 and can be served by any node.
 - **No wrapper structs for capnp-rpc**: `Node` implements `barka_svc::Server` directly. It holds `Arc<Mutex<...>>` internally so it's cheap to clone. `serve_rpc` takes a `Node` by value, creates one capnp client, and clones it per connection (same pattern as [queueber](https://github.com/asg0451/queueber)). Don't introduce intermediate types to bridge capnp-rpc and shared state.
 
 ### Leader election (`src/leader_election.rs`)

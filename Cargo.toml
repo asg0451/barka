@@ -24,6 +24,7 @@ aws-config = "1"
 aws-smithy-types = { version = "1", features = ["http-body-0-4-x"] }
 http-body = "0.4"
 http = "0.2"
+lru = "0.16"
 
 [build-dependencies]
 capnpc = "0.25"

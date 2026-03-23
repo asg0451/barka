@@ -1,5 +1,6 @@
 #![recursion_limit = "256"]
 
+pub mod consumer;
 pub mod jepsen_gateway;
 pub mod leader_election;
 pub mod lease;
@@ -10,3 +11,5 @@ pub mod producer;
 pub mod rpc;
 pub mod s3;
 pub mod segment;
+#[cfg(test)]
+pub mod test_util;

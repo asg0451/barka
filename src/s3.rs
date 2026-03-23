@@ -5,7 +5,7 @@ use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -196,17 +196,41 @@ pub async fn get_object_reader_if_present(
     bucket: &str,
     key: &str,
 ) -> Result<Option<impl std::io::Read>> {
-    let output = match client.get_object().bucket(bucket).key(key).send().await {
-        Ok(o) => o,
-        Err(e) if get_object_err_is_no_such_key(&e) => return Ok(None),
-        Err(e) => return Err(anyhow::Error::from(e).context("s3: get object")),
-    };
-    let body = output
-        .body
-        .collect()
-        .await
-        .context("s3: read object body")?;
-    Ok(Some(body.reader()))
+    Ok(get_object_bytes_if_present(client, bucket, key)
+        .await?
+        .map(std::io::Cursor::new))
+}
+
+/// Fetch an object's body as contiguous bytes.
+///
+/// Returns [`Ok(None)`] if the key does not exist (**NoSuchKey**).
+/// Retries transient S3 errors with jittered exponential backoff.
+#[tracing::instrument(skip(client), err)]
+pub async fn get_object_bytes_if_present(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<Option<Vec<u8>>> {
+    retry_with_backoff("get object bytes", || {
+        let client = client.clone();
+        let bucket = bucket.to_owned();
+        let key = key.to_owned();
+        async move {
+            let output = match client.get_object().bucket(&bucket).key(&key).send().await {
+                Ok(o) => o,
+                Err(e) if get_object_err_is_no_such_key(&e) => return RetryResult::Done(None),
+                Err(e) if is_transient_s3_error(&e) => {
+                    return RetryResult::Retry(anyhow::anyhow!(e).context("s3: get object"));
+                }
+                Err(e) => return RetryResult::Fail(anyhow::anyhow!(e).context("s3: get object")),
+            };
+            match output.body.collect().await {
+                Ok(body) => RetryResult::Done(Some(body.into_bytes().to_vec())),
+                Err(e) => RetryResult::Retry(anyhow::anyhow!(e).context("s3: read object body")),
+            }
+        }
+    })
+    .await
 }
 
 /// Fetch an object's body as a reader. The response is buffered in memory
