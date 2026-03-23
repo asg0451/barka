@@ -15,14 +15,11 @@ echo "building barka..."
 cargo build
 echo ""
 
-PIDS=()
-
 cleanup() {
     echo ""
     echo "--- shutting down all nodes ---"
-    for pid in "${PIDS[@]}"; do
-        kill "$pid" 2>/dev/null || true
-    done
+    trap - INT TERM
+    pkill -P $$ 2>/dev/null || true
     wait 2>/dev/null
     echo "done."
     exit 0
@@ -44,7 +41,6 @@ for i in $(seq 0 $((NUM_NODES - 1))); do
         --s3-prefix "$S3_PREFIX" \
         --leader-election-prefix "$S3_PREFIX" \
         2>&1 | sed "s/^/[node-$i] /" &
-    PIDS+=($!)
 done
 
 echo "consume-node: rpc=:$CONSUME_PORT"
@@ -55,7 +51,6 @@ RUST_LOG=barka=info RUST_BACKTRACE=1 \
     --s3-endpoint "$S3_ENDPOINT" \
     --s3-prefix "$S3_PREFIX" \
     2>&1 | sed "s/^/[consume] /" &
-PIDS+=($!)
 
 echo ""
 echo "all nodes started. press ctrl-c to stop."
