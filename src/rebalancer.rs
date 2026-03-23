@@ -261,7 +261,9 @@ pub async fn run_once(
 mod tests {
     use super::*;
 
-    fn make_snapshot(assignments: &[(&str, u32, Option<(u64, &str)>)]) -> Vec<PartitionLeadership> {
+    type Assignment<'a> = (&'a str, u32, Option<(u64, &'a str)>);
+
+    fn make_snapshot(assignments: &[Assignment<'_>]) -> Vec<PartitionLeadership> {
         assignments
             .iter()
             .map(|(topic, partition, leader)| PartitionLeadership {
