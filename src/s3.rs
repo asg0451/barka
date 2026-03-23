@@ -1,11 +1,11 @@
-use anyhow::{bail, Context, Result};
-use bytes::{Buf, Bytes};
+use anyhow::{Context, Result, bail};
+use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Region;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
-use aws_sdk_s3::Client;
+use bytes::{Buf, Bytes};
 
 use std::collections::VecDeque;
 use std::pin::Pin;
@@ -181,9 +181,8 @@ pub async fn list_objects(
 }
 
 fn get_object_err_is_no_such_key(err: &SdkError<GetObjectError>) -> bool {
-    err.as_service_error().is_some_and(|e| {
-        e.is_no_such_key() || e.code() == Some("NoSuchKey")
-    })
+    err.as_service_error()
+        .is_some_and(|e| e.is_no_such_key() || e.code() == Some("NoSuchKey"))
 }
 
 /// Fetch an object's body as a reader. The response is buffered in memory
@@ -197,13 +196,7 @@ pub async fn get_object_reader_if_present(
     bucket: &str,
     key: &str,
 ) -> Result<Option<impl std::io::Read>> {
-    let output = match client
-        .get_object()
-        .bucket(bucket)
-        .key(key)
-        .send()
-        .await
-    {
+    let output = match client.get_object().bucket(bucket).key(key).send().await {
         Ok(o) => o,
         Err(e) if get_object_err_is_no_such_key(&e) => return Ok(None),
         Err(e) => return Err(anyhow::Error::from(e).context("s3: get object")),
@@ -375,9 +368,7 @@ pub async fn put_if_absent(
                     Some(S3CASOutcome::AlreadyExists) => {
                         RetryResult::Done(PutOutcome::AlreadyExists)
                     }
-                    Some(S3CASOutcome::RetryableConflict) => {
-                        RetryResult::Retry(anyhow::anyhow!(e))
-                    }
+                    Some(S3CASOutcome::RetryableConflict) => RetryResult::Retry(anyhow::anyhow!(e)),
                     None if is_transient_s3_error(&e) => {
                         RetryResult::Retry(anyhow::anyhow!(e).context("s3: put if absent"))
                     }
@@ -468,17 +459,13 @@ pub async fn put_if_absent_stream(
                     Some(S3CASOutcome::AlreadyExists) => {
                         RetryResult::Done(PutOutcome::AlreadyExists)
                     }
-                    Some(S3CASOutcome::RetryableConflict) => {
-                        RetryResult::Retry(anyhow::anyhow!(e))
-                    }
+                    Some(S3CASOutcome::RetryableConflict) => RetryResult::Retry(anyhow::anyhow!(e)),
                     None if is_transient_s3_error(&e) => {
-                        RetryResult::Retry(
-                            anyhow::anyhow!(e).context("s3: put if absent stream"),
-                        )
+                        RetryResult::Retry(anyhow::anyhow!(e).context("s3: put if absent stream"))
                     }
-                    None => RetryResult::Fail(
-                        anyhow::anyhow!(e).context("s3: put if absent stream"),
-                    ),
+                    None => {
+                        RetryResult::Fail(anyhow::anyhow!(e).context("s3: put if absent stream"))
+                    }
                 },
             }
         }

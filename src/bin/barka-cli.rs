@@ -1,13 +1,17 @@
 use std::io::{self, BufRead, IsTerminal};
 use std::net::SocketAddr;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use barka::log_offset::format_decomposed;
 use barka::rpc::client::BarkaClient;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "barka-cli", version, about = "Cap'n Proto RPC client for barka")]
+#[command(
+    name = "barka-cli",
+    version,
+    about = "Cap'n Proto RPC client for barka"
+)]
 #[group(id = "mode", required = true, args = ["produce", "consume"])]
 struct Cli {
     #[arg(long, default_value = "127.0.0.1:9292")]
@@ -42,11 +46,7 @@ struct Cli {
 
 fn collect_produce_values(cli: &Cli) -> Result<Vec<Vec<u8>>> {
     if !cli.value.is_empty() {
-        return Ok(cli
-            .value
-            .iter()
-            .map(|s| s.as_bytes().to_vec())
-            .collect());
+        return Ok(cli.value.iter().map(|s| s.as_bytes().to_vec()).collect());
     }
 
     let stdin = io::stdin();

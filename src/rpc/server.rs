@@ -237,10 +237,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn e2e_default_producer_limits_single_large_produce() {
         const N: usize = 101;
-        assert!(
-            N > 100 && N <= producer::DEFAULT_MAX_RECORDS,
-            "pick N above test overrides and within DEFAULT_MAX_RECORDS"
-        );
+        const _: () = assert!(N > 100 && N <= producer::DEFAULT_MAX_RECORDS);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -321,9 +318,8 @@ mod tests {
                 local
                     .run_until(async {
                         let client = BarkaClient::connect(addr).await.unwrap();
-                        let values: Vec<Vec<u8>> = (0..N)
-                            .map(|i| format!("rec-{i}").into_bytes())
-                            .collect();
+                        let values: Vec<Vec<u8>> =
+                            (0..N).map(|i| format!("rec-{i}").into_bytes()).collect();
                         let recs = client
                             .produce("default-limits-topic", 0, values.clone())
                             .await

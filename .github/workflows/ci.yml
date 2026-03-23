@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack
+        ports:
+          - 4566:4566
+        env:
+          SERVICES: s3
+          DEFAULT_REGION: us-east-1
+          EAGER_SERVICE_LOADING: "1"
+          DEBUG: "0"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install capnproto
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Wait for LocalStack
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:4566/_localstack/health >/dev/null; then
+              echo "LocalStack is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "LocalStack did not become ready in time"
+          exit 1
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --tests -- -D warnings
+
+      - name: cargo test
+        run: cargo test

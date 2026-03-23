@@ -50,25 +50,24 @@ struct Cli {
 
 impl Cli {
     fn node_config(&self) -> NodeConfig {
-        let producer_limits =
-            if self.producer_max_records.is_some()
-                || self.producer_max_bytes.is_some()
-                || self.producer_linger_ms.is_some()
-            {
-                Some(ProducerBatchLimits {
-                    max_records: self
-                        .producer_max_records
-                        .unwrap_or(producer::DEFAULT_MAX_RECORDS),
-                    max_bytes: self
-                        .producer_max_bytes
-                        .unwrap_or(producer::DEFAULT_MAX_BYTES),
-                    linger_ms: self
-                        .producer_linger_ms
-                        .unwrap_or(producer::DEFAULT_LINGER_MS),
-                })
-            } else {
-                None
-            };
+        let producer_limits = if self.producer_max_records.is_some()
+            || self.producer_max_bytes.is_some()
+            || self.producer_linger_ms.is_some()
+        {
+            Some(ProducerBatchLimits {
+                max_records: self
+                    .producer_max_records
+                    .unwrap_or(producer::DEFAULT_MAX_RECORDS),
+                max_bytes: self
+                    .producer_max_bytes
+                    .unwrap_or(producer::DEFAULT_MAX_BYTES),
+                linger_ms: self
+                    .producer_linger_ms
+                    .unwrap_or(producer::DEFAULT_LINGER_MS),
+            })
+        } else {
+            None
+        };
         NodeConfig {
             node_id: self.node_id,
             rpc_addr: SocketAddr::new(self.bind, self.rpc_port),

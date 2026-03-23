@@ -166,10 +166,7 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
                         ok: false,
                         offset: None,
                         values: None,
-                        error: Some(format!(
-                            "request timed out after {:?}",
-                            REQUEST_TIMEOUT
-                        )),
+                        error: Some(format!("request timed out after {:?}", REQUEST_TIMEOUT)),
                     }
                 }
             }
@@ -210,10 +207,7 @@ async fn handle_json_line(client: &BarkaClient, line: &str) -> JsonlResponse {
                         ok: false,
                         offset: None,
                         values: None,
-                        error: Some(format!(
-                            "request timed out after {:?}",
-                            REQUEST_TIMEOUT
-                        )),
+                        error: Some(format!("request timed out after {:?}", REQUEST_TIMEOUT)),
                     }
                 }
             }

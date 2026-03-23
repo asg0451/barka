@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
-use tracing::{warn, Instrument};
+use tracing::{Instrument, warn};
 
 use crate::{
     log_offset::{self, compose},
@@ -279,8 +279,7 @@ impl PartitionProducer {
     ) -> Result<Arc<Self>> {
         let s3_client = crate::s3::build_client(s3_config).await;
         let bucket = s3_config.bucket.clone();
-        let next_sequence =
-            discover_next_segment_sequence(&s3_client, &bucket, &prefix).await?;
+        let next_sequence = discover_next_segment_sequence(&s3_client, &bucket, &prefix).await?;
         let producer = Arc::new(Self {
             bucket,
             s3_client,
@@ -348,7 +347,12 @@ impl PartitionProducer {
         }
         let byte_size = (request.total_size()?.word_count as usize) * 8;
 
-        let round = {
+        enum PendingFlush {
+            Ready(Arc<FlushRound>),
+            Waiting(oneshot::Receiver<Arc<FlushRound>>),
+        }
+
+        let pending = {
             let mut inner = self.inner.lock().unwrap();
             if record_count > inner.max_records {
                 anyhow::bail!(
@@ -383,14 +387,19 @@ impl PartitionProducer {
                 }
                 inner.pending_records = 0;
                 inner.pending_bytes = 0;
-                round
+                PendingFlush::Ready(round)
             } else {
                 let (tx, rx) = oneshot::channel();
                 inner.waiters.push(tx);
-                drop(inner);
-                rx.await
-                    .map_err(|_| anyhow::anyhow!("producer dropped before flush"))?
+                PendingFlush::Waiting(rx)
             }
+        };
+
+        let round = match pending {
+            PendingFlush::Ready(r) => r,
+            PendingFlush::Waiting(rx) => rx
+                .await
+                .map_err(|_| anyhow::anyhow!("producer dropped before flush"))?,
         };
 
         let done_rx = round.done.subscribe();
@@ -502,10 +511,9 @@ mod tests {
                 .as_nanos(),
             TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
         );
-        let next_sequence =
-            discover_next_segment_sequence(&s3_client, &config.bucket, &prefix)
-                .await
-                .unwrap();
+        let next_sequence = discover_next_segment_sequence(&s3_client, &config.bucket, &prefix)
+            .await
+            .unwrap();
         PartitionProducer {
             s3_client,
             bucket: config.bucket,

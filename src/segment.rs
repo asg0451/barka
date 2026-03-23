@@ -70,7 +70,10 @@ pub fn decode(data: &[u8]) -> anyhow::Result<(u64, Vec<RecordData>)> {
     let count = u32::from_le_bytes(data[8..12].try_into()?) as usize;
 
     let meta_end = HEADER_BYTES + count * PER_RECORD_META;
-    anyhow::ensure!(data.len() >= meta_end, "segment too short for record metadata");
+    anyhow::ensure!(
+        data.len() >= meta_end,
+        "segment too short for record metadata"
+    );
 
     let mut records = Vec::with_capacity(count);
     let mut cursor = meta_end;
