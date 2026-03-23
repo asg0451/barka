@@ -24,7 +24,11 @@ const MAX_CACHED_CONSUMERS: usize = 256;
 
 type ConsumerCache = Rc<RefCell<LruCache<(String, u32), Arc<PartitionConsumer>>>>;
 
-pub async fn serve_produce_rpc(partitions: PartitionMap, addr: SocketAddr) -> anyhow::Result<()> {
+pub async fn serve_produce_rpc(
+    partitions: PartitionMap,
+    addr: SocketAddr,
+    abdication_cooldown: std::time::Duration,
+) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "produce-rpc listening");
 
@@ -58,6 +62,7 @@ pub async fn serve_produce_rpc(partitions: PartitionMap, addr: SocketAddr) -> an
                     let per_conn = PerConnectionProduceNode {
                         partitions,
                         msg_bytes: call_bytes_queue,
+                        abdication_cooldown,
                     };
                     let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                     let rpc = RpcSystem::new(Box::new(network), Some(client.client));
@@ -74,6 +79,7 @@ pub async fn serve_produce_rpc(partitions: PartitionMap, addr: SocketAddr) -> an
 struct PerConnectionProduceNode {
     partitions: PartitionMap,
     msg_bytes: MessageBytesQueue,
+    abdication_cooldown: std::time::Duration,
 }
 
 impl produce_svc::Server for PerConnectionProduceNode {
@@ -118,6 +124,44 @@ impl produce_svc::Server for PerConnectionProduceNode {
             dst.set_offset(p.offset);
             dst.set_timestamp(p.timestamp);
         }
+        Ok(())
+    }
+
+    async fn abdicate(
+        self: Rc<Self>,
+        params: produce_svc::AbdicateParams,
+        mut results: produce_svc::AbdicateResults,
+    ) -> Result<(), capnp::Error> {
+        let params = params.get()?;
+        let topic = params.get_topic()?.to_string()?;
+        let partition = params.get_partition();
+        let key = (topic.clone(), partition);
+
+        let state = {
+            let map = self.partitions.read().unwrap();
+            map.get(&key).cloned()
+        };
+
+        let success = match state {
+            Some(state) => {
+                if let Some(epoch) = state.leadership.set_not_leader() {
+                    tracing::info!(
+                        %topic, partition, epoch,
+                        cooldown_secs = self.abdication_cooldown.as_secs(),
+                        "abdicated leadership via control API"
+                    );
+                }
+                state.producer.cancel_pending();
+                state.leadership.set_cooldown(self.abdication_cooldown);
+                true
+            }
+            None => {
+                tracing::warn!(%topic, partition, "abdicate: partition not found");
+                false
+            }
+        };
+
+        results.get().set_success(success);
         Ok(())
     }
 }
@@ -391,6 +435,7 @@ mod tests {
                         let per_conn = PerConnectionProduceNode {
                             partitions: pm,
                             msg_bytes: call_bytes_queue,
+                            abdication_cooldown: std::time::Duration::from_secs(60),
                         };
                         let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));
@@ -557,6 +602,7 @@ mod tests {
                         let per_conn = PerConnectionProduceNode {
                             partitions: pm,
                             msg_bytes: call_bytes_queue,
+                            abdication_cooldown: std::time::Duration::from_secs(60),
                         };
                         let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));
@@ -668,6 +714,7 @@ mod tests {
                                     let per_conn = PerConnectionProduceNode {
                                         partitions: Arc::clone(&pm),
                                         msg_bytes: call_bytes_queue,
+                                        abdication_cooldown: std::time::Duration::from_secs(60),
                                     };
                                     let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                                     let rpc = RpcSystem::new(Box::new(network), Some(client.client));
@@ -791,6 +838,7 @@ mod tests {
                         let per_conn = PerConnectionProduceNode {
                             partitions: pm,
                             msg_bytes: call_bytes_queue,
+                            abdication_cooldown: std::time::Duration::from_secs(60),
                         };
                         let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));
