@@ -138,7 +138,7 @@ impl ConsumeClient {
     }
 
     pub async fn consume(
-        &self,
+        &mut self,
         topic: &str,
         partition: u32,
         offset: u64,
