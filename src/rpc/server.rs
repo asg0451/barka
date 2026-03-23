@@ -163,21 +163,23 @@ impl produce_svc::Server for PerConnectionProduceNode {
 
         let success = match state {
             Some(state) => {
-                // Set cooldown before clearing leadership so the leader loop
-                // cannot re-acquire between the two calls.
-                state.leadership.set_cooldown(self.abdication_cooldown);
-                let was_leader = state.leadership.set_not_leader();
-                if let Some(epoch) = was_leader {
-                    tracing::info!(
-                        %topic, partition, epoch,
-                        cooldown_secs = self.abdication_cooldown.as_secs(),
-                        "abdicated leadership via control API"
-                    );
-                }
-                state.producer.cancel_pending();
+                // Check leadership first, before any side effects.
+                let is_leader = state.leadership.check_leader().is_some();
+                if is_leader {
+                    // Set cooldown before clearing leadership so the leader
+                    // loop cannot re-acquire between the two calls.
+                    state.leadership.set_cooldown(self.abdication_cooldown);
+                    let lost_epoch = state.leadership.set_not_leader();
+                    state.producer.cancel_pending();
 
-                // Only expire the S3 lock if we were actually the leader.
-                if was_leader.is_some() {
+                    if let Some(epoch) = lost_epoch {
+                        tracing::info!(
+                            %topic, partition, epoch,
+                            cooldown_secs = self.abdication_cooldown.as_secs(),
+                            "abdicated leadership via control API"
+                        );
+                    }
+
                     let namespace = leader_namespace(&topic, partition);
                     if let Err(e) = leader_election::force_abdicate(
                         &self.s3_client,
@@ -193,8 +195,11 @@ impl produce_svc::Server for PerConnectionProduceNode {
                             "failed to expire S3 lock (other nodes must wait for TTL)"
                         );
                     }
+                    true
+                } else {
+                    tracing::debug!(%topic, partition, "abdicate: not leading this partition");
+                    false
                 }
-                true
             }
             None => {
                 tracing::warn!(%topic, partition, "abdicate: partition not found");
