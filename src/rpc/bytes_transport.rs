@@ -392,11 +392,21 @@ mod tests {
 
     #[test]
     fn peek_discriminant_matches_capnp_library() {
-        let call_bytes = build_rpc_message(|m| { m.init_call(); });
-        assert_eq!(peek_rpc_message_discriminant(&call_bytes), Some(DISCRIM_CALL));
+        let call_bytes = build_rpc_message(|m| {
+            m.init_call();
+        });
+        assert_eq!(
+            peek_rpc_message_discriminant(&call_bytes),
+            Some(DISCRIM_CALL)
+        );
 
-        let return_bytes = build_rpc_message(|m| { m.init_return(); });
-        assert_eq!(peek_rpc_message_discriminant(&return_bytes), Some(DISCRIM_RETURN));
+        let return_bytes = build_rpc_message(|m| {
+            m.init_return();
+        });
+        assert_eq!(
+            peek_rpc_message_discriminant(&return_bytes),
+            Some(DISCRIM_RETURN)
+        );
     }
 
     #[test]

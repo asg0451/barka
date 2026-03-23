@@ -228,13 +228,7 @@ impl ProduceNode {
         let leader_handles: Vec<_> = inited
             .into_iter()
             .map(|(le, leadership, producer, span_prefix)| {
-                tokio::spawn(run_leader_loop(
-                    le,
-                    leadership,
-                    producer,
-                    poll,
-                    span_prefix,
-                ))
+                tokio::spawn(run_leader_loop(le, leadership, producer, poll, span_prefix))
             })
             .collect();
 
