@@ -51,3 +51,35 @@ Two communication layers (same backend; the gateway is a frontend only):
 - `db.clj` — starts/stops barka as a local process, waits for the Jepsen gateway port
 - `client.clj` — TCP/JSON client for the Jepsen gateway
 - `core.clj` — test definition with produce/consume generator and `log-checker` that validates ordering and completeness
+
+---
+
+## Working style (Claude Code agents)
+
+### Strategy
+
+1. **Plan mode default** — Enter plan mode for any non-trivial task (roughly three or more steps, or architectural choices). If execution goes sideways, stop and re-plan instead of pushing through. Use planning for verification as well as implementation. Write a clear spec up front to cut ambiguity.
+
+2. **Subagent strategy** — Use subagents liberally to keep the main context clean. Offload research, exploration, and parallel analysis to subagents. For hard problems, use more parallel subagent work. One focused task per subagent.
+
+3. **Self-improvement loop** — After any correction from the user, update `tasks/lessons.md` with the pattern and a rule that prevents repeating the mistake. Iterate on those lessons; at session start, skim lessons that apply to this project.
+
+4. **Verification before done** — Do not mark work complete without evidence it works. When useful, compare behavior against main (or baseline) and your branch. Ask whether a staff engineer would accept the change. Run tests, inspect logs, and show correctness.
+
+5. **Demand elegance (balanced)** — For non-trivial changes, pause and ask if there is a cleaner approach. If a fix feels hacky, redo it with full context—prefer the elegant path. Skip this for small, obvious fixes; avoid over-engineering. Critique your own work before handing it off.
+
+6. **Autonomous bug fixing** — On bug reports: fix them without asking for hand-holding. Use logs, errors, and failing tests as ground truth. Prefer zero back-and-forth from the user; repair failing CI without waiting for step-by-step instructions.
+
+### Task management
+
+1. **Plan first** — Write the plan to `tasks/todo.md` with checkable items (create `tasks/` if it does not exist yet).
+2. **Verify plan** — Sanity-check the plan before coding.
+3. **Track progress** — Check items off as you finish them.
+4. **Explain changes** — Give a short high-level summary at each meaningful step.
+5. **Document results** — Add a brief review section to `tasks/todo.md` when wrapping up.
+6. **Capture lessons** — After user corrections, update `tasks/lessons.md`.
+
+### Core principles
+
+- **Simplicity first** — Make each change as small and direct as possible; touch only what the task requires.
+- **No laziness** — Find root causes; avoid temporary or cosmetic fixes. Hold work to senior-engineer standards.
