@@ -32,7 +32,10 @@ jobs:
 
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@v1
+        # pinned to v1.0.73: v1.0.74+ has a regression where restoreConfigFromBase
+        # hardcodes "main" instead of using the repo's default branch.
+        # https://github.com/anthropics/claude-code-action/issues/1085
+        uses: anthropics/claude-code-action@v1.0.73
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           base_branch: master
