@@ -14,7 +14,7 @@ use bytes::{Bytes, BytesMut};
 use capnp::capability::Promise;
 use capnp::message::ReaderOptions;
 use capnp::serialize::BufferSegments;
-use capnp_rpc::rpc_capnp;
+
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, FutureExt, TryFutureExt};
 
 use std::cell::RefCell;
@@ -116,26 +116,44 @@ where
     Ok(Some(buf.freeze()))
 }
 
-fn is_call_message(bytes: &Bytes, options: ReaderOptions) -> bool {
-    let Ok(segments) = BufferSegments::new(bytes.clone(), options) else {
-        return false;
-    };
-    let reader = capnp::message::Reader::new(segments, options);
-    let Ok(body) = reader.get_root::<rpc_capnp::message::Reader<'_>>() else {
-        return false;
-    };
-    matches!(body.which(), Ok(rpc_capnp::message::Call(_)))
-}
+// rpc.capnp Message union discriminants (ordinals from the schema).
+const DISCRIM_CALL: u16 = 2;
+const DISCRIM_RETURN: u16 = 3;
 
-fn is_return_message(bytes: &Bytes, options: ReaderOptions) -> bool {
-    let Ok(segments) = BufferSegments::new(bytes.clone(), options) else {
-        return false;
-    };
-    let reader = capnp::message::Reader::new(segments, options);
-    let Ok(body) = reader.get_root::<rpc_capnp::message::Reader<'_>>() else {
-        return false;
-    };
-    matches!(body.which(), Ok(rpc_capnp::message::Return(_)))
+/// Read the `rpc_capnp::message` union discriminant directly from raw capnp
+/// bytes — just the segment-table arithmetic plus one u16 load — avoiding the
+/// cost of constructing `BufferSegments` + `Reader` + `.which()`.
+fn peek_rpc_message_discriminant(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() < 8 {
+        return None;
+    }
+    let seg_count = u32::from_le_bytes(bytes[0..4].try_into().ok()?).wrapping_add(1) as usize;
+    if seg_count == 0 || seg_count >= 512 {
+        return None;
+    }
+    let table_bytes = ((seg_count / 2) + 1) * 8;
+
+    if bytes.len() < table_bytes + 8 {
+        return None;
+    }
+    let ptr = u64::from_le_bytes(bytes[table_bytes..table_bytes + 8].try_into().ok()?);
+    if ptr & 3 != 0 {
+        return None; // not a struct pointer
+    }
+
+    let offset_words = ((ptr as u32) as i32) >> 2;
+    let data_off = (table_bytes as isize) + 8 + (offset_words as isize) * 8;
+    if data_off < 0 {
+        return None;
+    }
+    let data_off = data_off as usize;
+    if data_off + 2 > bytes.len() {
+        return None;
+    }
+
+    Some(u16::from_le_bytes(
+        bytes[data_off..data_off + 2].try_into().ok()?,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -244,13 +262,18 @@ impl<T: AsyncRead + Unpin> capnp_rpc::Connection<VatId> for Connection<T> {
                 match maybe_bytes {
                     None => Ok(None),
                     Some(bytes) => {
+                        let discrim = if call_queue.is_some() || return_queue.is_some() {
+                            peek_rpc_message_discriminant(&bytes)
+                        } else {
+                            None
+                        };
                         if let Some(ref q) = call_queue
-                            && is_call_message(&bytes, receive_options)
+                            && discrim == Some(DISCRIM_CALL)
                         {
                             q.borrow_mut().push_back(bytes.clone());
                         }
                         if let Some(ref q) = return_queue
-                            && is_return_message(&bytes, receive_options)
+                            && discrim == Some(DISCRIM_RETURN)
                         {
                             q.borrow_mut().push_back(bytes.clone());
                         }
