@@ -66,7 +66,7 @@ struct ProduceArgs {
     #[arg(short = 'n', long, default_value_t = 0)]
     partition: u32,
 
-    /// Record payload as UTF-8 (repeat for multiple records). With --produce, if omitted and stdin is piped, one record per line is read.
+    /// Record payload as UTF-8 (repeat for multiple records). If omitted and stdin is piped, one record per line is read.
     #[arg(short, long)]
     value: Vec<String>,
 
