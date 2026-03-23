@@ -93,28 +93,38 @@ async fn refresh_from_s3(
     entries.sort_by(|a, b| a.topic.cmp(&b.topic).then(a.partition.cmp(&b.partition)));
 
     let base_prefix = node::segment_key_prefix(s3_prefix);
+
+    let futs: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            let namespace = node::leader_namespace(&entry.topic, entry.partition);
+            let data_prefix =
+                node::partition_data_prefix(&base_prefix, &entry.topic, entry.partition);
+            async move {
+                let leader =
+                    leader_election::read_current_leader(s3_client, bucket, &namespace, le_prefix)
+                        .await
+                        .ok()
+                        .flatten();
+                let seg_count = s3::list_objects(s3_client, bucket, &data_prefix)
+                    .await
+                    .map(|objs| objs.len())
+                    .unwrap_or(0);
+                (leader, seg_count)
+            }
+        })
+        .collect();
+    let results = futures::future::join_all(futs).await;
+
     let mut partitions = Vec::with_capacity(entries.len());
     let mut total_segments = 0usize;
     let mut node_ids = HashSet::new();
 
-    for entry in &entries {
-        let namespace = node::leader_namespace(&entry.topic, entry.partition);
-        let leader = leader_election::read_current_leader(s3_client, bucket, &namespace, le_prefix)
-            .await
-            .ok()
-            .flatten();
-
-        let data_prefix = node::partition_data_prefix(&base_prefix, &entry.topic, entry.partition);
-        let seg_count = s3::list_objects(s3_client, bucket, &data_prefix)
-            .await
-            .map(|objs| objs.len())
-            .unwrap_or(0);
+    for (entry, (leader, seg_count)) in entries.iter().zip(results) {
         total_segments += seg_count;
-
         if let Some(ref l) = leader {
             node_ids.insert(l.node_id);
         }
-
         partitions.push(PartitionState {
             topic: entry.topic.clone(),
             partition: entry.partition,
@@ -357,6 +367,12 @@ fn main() -> Result<()> {
         .enable_all()
         .build()
         .context("tokio runtime")?;
+
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        ratatui::restore();
+        original_hook(info);
+    }));
 
     let mut terminal = ratatui::init();
     let result = rt.block_on(async {
