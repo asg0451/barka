@@ -379,3 +379,29 @@ impl<T: AsyncRead + Unpin> capnp_rpc::VatNetwork<VatId> for BytesVatNetwork<T> {
         Promise::from_future(self.execution_driver.clone())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn build_rpc_message(init: impl FnOnce(capnp_rpc::rpc_capnp::message::Builder<'_>)) -> Vec<u8> {
+        let mut msg = capnp::message::Builder::new_default();
+        init(msg.init_root());
+        capnp::serialize::write_message_to_words(&msg)
+    }
+
+    #[test]
+    fn peek_discriminant_matches_capnp_library() {
+        let call_bytes = build_rpc_message(|m| { m.init_call(); });
+        assert_eq!(peek_rpc_message_discriminant(&call_bytes), Some(DISCRIM_CALL));
+
+        let return_bytes = build_rpc_message(|m| { m.init_return(); });
+        assert_eq!(peek_rpc_message_discriminant(&return_bytes), Some(DISCRIM_RETURN));
+    }
+
+    #[test]
+    fn peek_discriminant_none_on_short_input() {
+        assert_eq!(peek_rpc_message_discriminant(&[]), None);
+        assert_eq!(peek_rpc_message_discriminant(&[0u8; 7]), None);
+    }
+}
