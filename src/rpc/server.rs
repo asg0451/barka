@@ -370,7 +370,8 @@ mod tests {
                 local
                     .run_until(async {
                         let produce_client = ProduceClient::connect(produce_addr).await.unwrap();
-                        let mut consume_client = ConsumeClient::connect(consume_addr).await.unwrap();
+                        let mut consume_client =
+                            ConsumeClient::connect(consume_addr).await.unwrap();
 
                         let recs = produce_client
                             .produce("test-topic", 0, vec![b"hello".to_vec(), b"world".to_vec()])
