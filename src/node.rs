@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::consumer::{ConsumerConfig, PartitionConsumer};
 use crate::jepsen_gateway;
 use crate::log::partition::Partition;
 use crate::producer::PartitionProducer;
@@ -81,6 +82,7 @@ pub struct Node {
     pub config: NodeConfig,
     pub partitions: Arc<Mutex<HashMap<TopicPartition, Partition>>>,
     pub producer: Arc<PartitionProducer>,
+    pub consumer: Arc<PartitionConsumer>,
 }
 
 impl Node {
@@ -91,7 +93,7 @@ impl Node {
             Some(l) => {
                 PartitionProducer::with_opts(
                     s3_config,
-                    partition_prefix,
+                    partition_prefix.clone(),
                     0,
                     l.max_records,
                     l.max_bytes,
@@ -99,12 +101,27 @@ impl Node {
                 )
                 .await?
             }
-            None => PartitionProducer::new(s3_config, partition_prefix, 0).await?,
+            None => PartitionProducer::new(s3_config, partition_prefix.clone(), 0).await?,
         };
+
+        let cache_dir = std::env::temp_dir()
+            .join("barka-segment-cache")
+            .join(partition_prefix.replace('/', "-"));
+        let consumer = PartitionConsumer::new(
+            s3_config,
+            partition_prefix,
+            ConsumerConfig {
+                cache_dir,
+                ..Default::default()
+            },
+        )
+        .await?;
+
         Ok(Self {
             config,
             partitions: Arc::new(Mutex::new(HashMap::new())),
             producer,
+            consumer,
         })
     }
 
@@ -175,28 +192,30 @@ impl Node {
     }
 
     /// Apply a Cap'n Proto [`consume_request::Reader`] and fill [`consume_response::Builder`].
-    pub fn apply_consume_request(
+    ///
+    /// Fetches segments from S3 via the [`PartitionConsumer`] (with two-tier
+    /// LRU caching and prefetch).
+    pub async fn apply_consume_request(
         &self,
         request: consume_request::Reader<'_>,
         response: consume_response::Builder<'_>,
     ) -> capnp::Result<()> {
-        let topic = request.get_topic()?.to_string()?;
-        let partition = request.get_partition();
+        let _topic = request.get_topic()?.to_string()?;
+        let _partition = request.get_partition();
         let offset = request.get_offset();
         let max = request.get_max_records();
 
-        let tp = (topic, partition);
-        let partitions = self.partitions.lock().unwrap();
-        let records = partitions
-            .get(&tp)
-            .map(|p| p.read(offset, max))
-            .unwrap_or_default();
+        let records = self
+            .consumer
+            .consume(offset, max)
+            .await
+            .map_err(|e| capnp::Error::failed(e.to_string()))?;
 
         let mut list = response.init_records(records.len() as u32);
         for (i, rec) in records.iter().enumerate() {
             let mut entry = list.reborrow().get(i as u32);
-            if let Some(ref k) = rec.key {
-                entry.set_key(k);
+            if !rec.key.is_empty() {
+                entry.set_key(&rec.key);
             }
             entry.set_value(&rec.value);
             entry.set_offset(rec.offset);

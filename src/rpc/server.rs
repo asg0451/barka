@@ -106,7 +106,7 @@ impl barka_svc::Server for PerConnectionNode {
         let _raw = self.msg_bytes.borrow_mut().pop_front();
         let req = params.get()?.get_request()?;
         let resp = results.get().get_response()?;
-        self.node.apply_consume_request(req, resp)?;
+        self.node.apply_consume_request(req, resp).await?;
         Ok(())
     }
 }
@@ -151,6 +151,13 @@ mod tests {
                         .unwrap()
                         .as_nanos()
                 )),
+                // max_records=2 so the first produce (2 records) flushes immediately;
+                // the second (1 record) flushes on the 100ms linger timer.
+                producer_limits: Some(ProducerBatchLimits {
+                    max_records: 2,
+                    max_bytes: 1024 * 1024,
+                    linger_ms: 100,
+                }),
                 ..Default::default()
             },
             &s3_config,
@@ -222,6 +229,43 @@ mod tests {
                         assert_eq!(recs2.len(), 1);
                         assert_eq!(recs2[0].offset, compose(1, 0));
                         assert_eq!(recs2[0].value, b"third");
+
+                        // Consume from segment 0: should return "hello", "world"
+                        let consumed = client
+                            .consume("test-topic", 0, compose(0, 0), 10)
+                            .await
+                            .unwrap();
+                        assert_eq!(consumed.len(), 3, "should get all 3 records across both segments");
+                        assert_eq!(consumed[0].value, b"hello");
+                        assert_eq!(consumed[0].offset, compose(0, 0));
+                        assert_eq!(consumed[1].value, b"world");
+                        assert_eq!(consumed[1].offset, compose(0, 1));
+                        assert_eq!(consumed[2].value, b"third");
+                        assert_eq!(consumed[2].offset, compose(1, 0));
+
+                        // Consume from mid-segment offset
+                        let consumed2 = client
+                            .consume("test-topic", 0, compose(0, 1), 10)
+                            .await
+                            .unwrap();
+                        assert_eq!(consumed2.len(), 2, "should skip first record");
+                        assert_eq!(consumed2[0].value, b"world");
+                        assert_eq!(consumed2[1].value, b"third");
+
+                        // Consume from segment 1 only
+                        let consumed3 = client
+                            .consume("test-topic", 0, compose(1, 0), 10)
+                            .await
+                            .unwrap();
+                        assert_eq!(consumed3.len(), 1);
+                        assert_eq!(consumed3[0].value, b"third");
+
+                        // Consume past all data — should be empty
+                        let consumed4 = client
+                            .consume("test-topic", 0, compose(2, 0), 10)
+                            .await
+                            .unwrap();
+                        assert!(consumed4.is_empty(), "no segment 2 exists");
                     })
                     .await;
             });
