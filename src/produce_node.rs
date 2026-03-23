@@ -449,6 +449,16 @@ async fn run_registry_poller(
                 state.producer.cancel_pending();
             }
         }
+
+        // Reap crashed LE loops so failures aren't silently lost.
+        le_handles.retain(|key, handle| {
+            if handle.is_finished() {
+                tracing::error!(topic = %key.0, partition = key.1, "leader election loop exited unexpectedly");
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 

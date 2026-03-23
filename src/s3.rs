@@ -333,7 +333,7 @@ enum S3CASOutcome {
 /// Returns `None` for errors unrelated to conditional-write semantics
 /// (e.g. network failures, auth errors), leaving them for the caller to
 /// classify as transient or fatal.
-fn classify_put_if_absent_error(err: &SdkError<PutObjectError>) -> Option<S3CASOutcome> {
+fn classify_s3_cas_error(err: &SdkError<PutObjectError>) -> Option<S3CASOutcome> {
     let status = err.raw_response().map(|r| r.status().as_u16());
     let code = err.code();
 
@@ -388,7 +388,7 @@ pub async fn put_if_absent(
                 .await
             {
                 Ok(_) => RetryResult::Done(PutOutcome::Created),
-                Err(e) => match classify_put_if_absent_error(&e) {
+                Err(e) => match classify_s3_cas_error(&e) {
                     Some(S3CASOutcome::AlreadyExists) => {
                         RetryResult::Done(PutOutcome::AlreadyExists)
                     }
@@ -485,7 +485,7 @@ pub async fn put_if_match(
                 .await
             {
                 Ok(_) => RetryResult::Done(PutIfMatchOutcome::Updated),
-                Err(e) => match classify_put_if_absent_error(&e) {
+                Err(e) => match classify_s3_cas_error(&e) {
                     Some(S3CASOutcome::AlreadyExists) => {
                         // 412 = ETag mismatch (object changed since read)
                         RetryResult::Done(PutIfMatchOutcome::Conflict)
@@ -577,7 +577,7 @@ pub async fn put_if_absent_stream(
                 .await
             {
                 Ok(_) => RetryResult::Done(PutOutcome::Created),
-                Err(e) => match classify_put_if_absent_error(&e) {
+                Err(e) => match classify_s3_cas_error(&e) {
                     Some(S3CASOutcome::AlreadyExists) => {
                         RetryResult::Done(PutOutcome::AlreadyExists)
                     }

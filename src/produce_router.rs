@@ -77,7 +77,9 @@ impl ProduceRouter {
                         tracing::warn!(attempt, %namespace, "no leader found");
                         // Ensure this partition is in the registry so a
                         // produce-node will pick it up and start LE for it.
-                        if let Err(e) = self.registry.add(topic, partition).await {
+                        if attempt <= 1
+                            && let Err(e) = self.registry.add(topic, partition).await
+                        {
                             tracing::warn!(error = %e, "registry add failed");
                         }
                         continue;
