@@ -387,6 +387,44 @@ pub async fn read_current_leader(
     }))
 }
 
+/// Force-expire the current leader's lock file for `namespace`.
+/// Returns `Ok(true)` if a lock was expired, `Ok(false)` if no active leader was found.
+pub async fn force_abdicate(
+    s3_client: &aws_sdk_s3::Client,
+    bucket: &str,
+    namespace: &str,
+    leader_election_prefix: Option<&str>,
+) -> Result<bool> {
+    let prefix = leader_lock_s3_prefix(leader_election_prefix, namespace);
+    let contents = s3::list_objects(s3_client, bucket, &prefix).await?;
+
+    let newest = match contents.last() {
+        Some(obj) => obj,
+        None => return Ok(false),
+    };
+
+    let key = newest.key().context("S3 object missing key")?;
+    let reader = match s3::get_object_reader_if_present(s3_client, bucket, key).await? {
+        Some(r) => r,
+        None => return Ok(false),
+    };
+
+    let lock_file: LockFile = serde_json::from_reader(reader).context("deserialize lock file")?;
+    if lock_file.expired {
+        return Ok(false);
+    }
+
+    let body = serde_json::to_string(&LockFile {
+        valid_until_ms: 0,
+        expired: true,
+        node_id: lock_file.node_id,
+        addr: lock_file.addr,
+    })
+    .unwrap();
+    s3::put_object(s3_client, bucket, key, body).await?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

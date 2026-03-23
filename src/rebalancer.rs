@@ -107,6 +107,8 @@ pub fn compute_plan(
         };
     }
 
+    // Target is based on currently-led partitions only. Leaderless partitions
+    // are excluded — once they get claimed the next cycle will re-evaluate.
     let total_led: usize = by_node.values().map(|v| v.len()).sum();
     let target = total_led.div_ceil(node_count);
 

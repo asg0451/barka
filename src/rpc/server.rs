@@ -14,11 +14,12 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use tracing::{error, info};
 
 use crate::consumer::{ConsumerConfig, PartitionConsumer};
-use crate::node::partition_data_prefix;
+use crate::leader_election;
+use crate::node::{leader_namespace, partition_data_prefix};
 use crate::produce_node::PartitionMap;
 use crate::rpc::barka_capnp::{consume_svc, produce_svc};
 use crate::rpc::bytes_transport::{BytesVatNetwork, MessageBytesQueue};
-use crate::s3::S3Config;
+use crate::s3::{self, S3Config};
 
 const MAX_CACHED_CONSUMERS: usize = 256;
 
@@ -28,6 +29,8 @@ pub async fn serve_produce_rpc(
     partitions: PartitionMap,
     addr: SocketAddr,
     abdication_cooldown: std::time::Duration,
+    s3_config: S3Config,
+    leader_election_prefix: Option<String>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     info!(%addr, "produce-rpc listening");
@@ -35,6 +38,10 @@ pub async fn serve_produce_rpc(
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
+            let s3_client = Rc::new(s3::build_client(&s3_config).await);
+            let bucket = Rc::new(s3_config.bucket);
+            let le_prefix: Rc<Option<String>> = Rc::new(leader_election_prefix);
+
             loop {
                 let (stream, remote) = match listener.accept().await {
                     Ok(v) => v,
@@ -45,6 +52,9 @@ pub async fn serve_produce_rpc(
                 };
                 info!(%remote, "produce-rpc connection");
                 let partitions = Arc::clone(&partitions);
+                let s3_client = Rc::clone(&s3_client);
+                let bucket = Rc::clone(&bucket);
+                let le_prefix = Rc::clone(&le_prefix);
 
                 tokio::task::spawn_local(async move {
                     let stream = stream.compat();
@@ -63,6 +73,9 @@ pub async fn serve_produce_rpc(
                         partitions,
                         msg_bytes: call_bytes_queue,
                         abdication_cooldown,
+                        s3_client,
+                        bucket,
+                        le_prefix,
                     };
                     let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                     let rpc = RpcSystem::new(Box::new(network), Some(client.client));
@@ -80,6 +93,9 @@ struct PerConnectionProduceNode {
     partitions: PartitionMap,
     msg_bytes: MessageBytesQueue,
     abdication_cooldown: std::time::Duration,
+    s3_client: Rc<aws_sdk_s3::Client>,
+    bucket: Rc<String>,
+    le_prefix: Rc<Option<String>>,
 }
 
 impl produce_svc::Server for PerConnectionProduceNode {
@@ -144,6 +160,9 @@ impl produce_svc::Server for PerConnectionProduceNode {
 
         let success = match state {
             Some(state) => {
+                // Set cooldown before clearing leadership so the leader loop
+                // cannot re-acquire between the two calls.
+                state.leadership.set_cooldown(self.abdication_cooldown);
                 if let Some(epoch) = state.leadership.set_not_leader() {
                     tracing::info!(
                         %topic, partition, epoch,
@@ -152,7 +171,22 @@ impl produce_svc::Server for PerConnectionProduceNode {
                     );
                 }
                 state.producer.cancel_pending();
-                state.leadership.set_cooldown(self.abdication_cooldown);
+
+                // Expire the S3 lock so other nodes can claim the partition immediately.
+                let namespace = leader_namespace(&topic, partition);
+                if let Err(e) = leader_election::force_abdicate(
+                    &self.s3_client,
+                    &self.bucket,
+                    &namespace,
+                    self.le_prefix.as_deref(),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        %topic, partition, error = %e,
+                        "failed to expire S3 lock (other nodes must wait for TTL)"
+                    );
+                }
                 true
             }
             None => {
@@ -368,6 +402,15 @@ mod tests {
         (Arc::new(std::sync::RwLock::new(map)), leadership)
     }
 
+    async fn test_s3_fields(
+        s3_config: &S3Config,
+    ) -> (Rc<aws_sdk_s3::Client>, Rc<String>, Rc<Option<String>>) {
+        let client = Rc::new(crate::s3::build_client(s3_config).await);
+        let bucket = Rc::new(s3_config.bucket.clone());
+        let le_prefix = Rc::new(None);
+        (client, bucket, le_prefix)
+    }
+
     fn make_consume_node(s3_config: &S3Config, s3_prefix: &str) -> PerConnectionConsumeNode {
         let base_prefix = segment_key_prefix(Some(s3_prefix));
         PerConnectionConsumeNode {
@@ -410,6 +453,7 @@ mod tests {
         leadership.set_leader(u64::MAX, 0);
 
         let pm = Arc::clone(&partitions);
+        let ps3 = s3_config.clone();
         let produce_server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -419,6 +463,7 @@ mod tests {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async {
+                        let (s3c, bkt, lep) = test_s3_fields(&ps3).await;
                         let (stream, _) = produce_listener.accept().await.unwrap();
                         let stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
                         let (reader, writer) = futures::AsyncReadExt::split(stream);
@@ -436,6 +481,9 @@ mod tests {
                             partitions: pm,
                             msg_bytes: call_bytes_queue,
                             abdication_cooldown: std::time::Duration::from_secs(60),
+                            s3_client: s3c,
+                            bucket: bkt,
+                            le_prefix: lep,
                         };
                         let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));
@@ -577,6 +625,7 @@ mod tests {
         leadership.set_leader(u64::MAX, 0);
 
         let pm = Arc::clone(&partitions);
+        let ss3 = s3_config.clone();
         let server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -586,6 +635,7 @@ mod tests {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async {
+                        let (s3c, bkt, lep) = test_s3_fields(&ss3).await;
                         let (stream, _) = listener.accept().await.unwrap();
                         let stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
                         let (reader, writer) = futures::AsyncReadExt::split(stream);
@@ -603,6 +653,9 @@ mod tests {
                             partitions: pm,
                             msg_bytes: call_bytes_queue,
                             abdication_cooldown: std::time::Duration::from_secs(60),
+                            s3_client: s3c,
+                            bucket: bkt,
+                            le_prefix: lep,
                         };
                         let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));
@@ -680,6 +733,7 @@ mod tests {
         leadership.set_leader(u64::MAX, 0);
 
         let pm = Arc::clone(&partitions);
+        let ss3 = s3_config.clone();
         let server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -689,6 +743,7 @@ mod tests {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async move {
+                        let (s3c, bkt, lep) = test_s3_fields(&ss3).await;
                         let mut shutdown_rx = pin!(shutdown_rx);
                         loop {
                             tokio::select! {
@@ -715,6 +770,9 @@ mod tests {
                                         partitions: Arc::clone(&pm),
                                         msg_bytes: call_bytes_queue,
                                         abdication_cooldown: std::time::Duration::from_secs(60),
+                                        s3_client: Rc::clone(&s3c),
+                                        bucket: Rc::clone(&bkt),
+                                        le_prefix: Rc::clone(&lep),
                                     };
                                     let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                                     let rpc = RpcSystem::new(Box::new(network), Some(client.client));
@@ -813,6 +871,7 @@ mod tests {
         // Deliberately NOT calling set_leader — node should reject produce.
 
         let pm = Arc::clone(&partitions);
+        let ss3 = s3_config.clone();
         let server = tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -822,6 +881,7 @@ mod tests {
                 let local = tokio::task::LocalSet::new();
                 local
                     .run_until(async {
+                        let (s3c, bkt, lep) = test_s3_fields(&ss3).await;
                         let (stream, _) = listener.accept().await.unwrap();
                         let stream = tokio_util::compat::TokioAsyncReadCompatExt::compat(stream);
                         let (reader, writer) = futures::AsyncReadExt::split(stream);
@@ -839,6 +899,9 @@ mod tests {
                             partitions: pm,
                             msg_bytes: call_bytes_queue,
                             abdication_cooldown: std::time::Duration::from_secs(60),
+                            s3_client: s3c,
+                            bucket: bkt,
+                            le_prefix: lep,
                         };
                         let client: produce_svc::Client = capnp_rpc::new_client(per_conn);
                         let rpc = RpcSystem::new(Box::new(network), Some(client.client));

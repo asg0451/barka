@@ -223,12 +223,20 @@ impl ProduceNode {
         let partitions = Arc::clone(&self.partitions);
 
         let abdication_cooldown = Duration::from_secs(self.config.abdication_cooldown_secs);
+        let s3_config = self.s3_config.clone();
+        let le_prefix = self.config.leader_election_prefix.clone();
         let rpc_handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(serve_produce_rpc(partitions, rpc_addr, abdication_cooldown))
+            rt.block_on(serve_produce_rpc(
+                partitions,
+                rpc_addr,
+                abdication_cooldown,
+                s3_config,
+                le_prefix,
+            ))
         });
 
         let le_poll = Duration::from_secs(self.config.leader_election_poll_secs);
