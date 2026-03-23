@@ -74,7 +74,9 @@
       "Bash(act --json)",
       "Bash(cargo run:*)",
       "Bash(act push:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(git pull:*)",
+      "Bash(git stash:*)"
     ],
     "additionalDirectories": [
       "~/.claude/projects/-Users-miles-proj-barka/tool-results"

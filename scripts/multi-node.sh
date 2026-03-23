@@ -22,10 +22,14 @@ cleanup() {
     trap - INT TERM
     pkill -P $$ 2>/dev/null || true
     wait 2>/dev/null
+    rm -f "$PREFIX_FILE"
     echo "done."
     exit 0
 }
 trap cleanup INT TERM
+
+PREFIX_FILE="/tmp/barka-prefix.txt"
+echo "$S3_PREFIX" > "$PREFIX_FILE"
 
 echo "starting $NUM_NODES produce-nodes + 1 consume-node + 1 rebalancer (s3-prefix=$S3_PREFIX)"
 echo ""
