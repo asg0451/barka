@@ -74,6 +74,7 @@ pub struct LeaderElection {
     s3_client: aws_sdk_s3::Client,
     bucket: String,
     prefix: String,
+    validity_millis: u64,
 }
 
 const LOCK_FILE_PREFIX: &str = "lock/";
@@ -112,6 +113,7 @@ impl LeaderElection {
             s3_client,
             bucket: config.s3_config.bucket.clone(),
             prefix,
+            validity_millis: config.validity_millis.unwrap_or(VALIDITY_MILLIS),
         }
     }
 
@@ -154,14 +156,22 @@ impl LeaderElection {
                     .as_millis() as u64;
                 if !lock_file.expired && lock_file.valid_until_ms > now_ms {
                     if lock_file.node_id == self.node_id {
+                        let remaining_ms = lock_file.valid_until_ms - now_ms;
+                        let epoch = last_epoch.unwrap();
+
+                        if remaining_ms < self.validity_millis / 2 {
+                            // Renew the lease before it expires
+                            return self.renew_lease(key, epoch).await;
+                        }
+
                         tracing::debug!(
                             valid_until_ms = lock_file.valid_until_ms,
-                            now_ms,
+                            remaining_ms,
                             "still leader"
                         );
                         return Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
                             valid_until_ms: lock_file.valid_until_ms,
-                            epoch: last_epoch.unwrap(),
+                            epoch,
                         }));
                     }
                     tracing::debug!(
@@ -178,7 +188,7 @@ impl LeaderElection {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64;
-            let valid_until_ms = now_ms + VALIDITY_MILLIS;
+            let valid_until_ms = now_ms + self.validity_millis;
 
             let lock_file_body = serde_json::to_string(&LockFile {
                 valid_until_ms,
@@ -229,6 +239,67 @@ impl LeaderElection {
         }
 
         anyhow::bail!("leader election: exhausted retries after concurrent lock cleanup");
+    }
+
+    /// Overwrite our lock file with a fresh TTL, then re-list to verify no newer epoch appeared.
+    async fn renew_lease(&self, key: &str, epoch: Epoch) -> Result<TryBecomeLeaderResult> {
+        const RENEW_ATTEMPTS: u32 = 3;
+        let mut new_valid_until = 0u64;
+
+        for attempt in 0..RENEW_ATTEMPTS {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            new_valid_until = now + self.validity_millis;
+
+            let body = serde_json::to_string(&LockFile {
+                valid_until_ms: new_valid_until,
+                expired: false,
+                node_id: self.node_id,
+                addr: self.addr,
+            })
+            .unwrap();
+
+            if let Err(e) = s3::put_object(&self.s3_client, &self.bucket, key, body).await {
+                tracing::warn!(attempt, error = %e, "lease renewal put failed, retrying");
+                continue;
+            }
+
+            match s3::list_objects(&self.s3_client, &self.bucket, &self.prefix).await {
+                Ok(fresh_contents) => {
+                    if let Some(newest) = fresh_contents.last()
+                        && let Some(newest_key) = newest.key()
+                    {
+                        let fresh_epoch = Epoch::from_key(newest_key)?;
+                        if fresh_epoch != epoch {
+                            tracing::warn!(
+                                our_epoch = epoch.0,
+                                fresh_epoch = fresh_epoch.0,
+                                "newer epoch appeared during renewal"
+                            );
+                            return Ok(TryBecomeLeaderResult::NotLeader);
+                        }
+                    }
+                    tracing::debug!(epoch = epoch.0, new_valid_until, "renewed lease");
+                    return Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
+                        valid_until_ms: new_valid_until,
+                        epoch,
+                    }));
+                }
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "lease renewal verify-list failed, retrying");
+                    continue;
+                }
+            }
+        }
+
+        // All renewal attempts failed -- still within TTL, next poll will retry
+        tracing::warn!("lease renewal failed after {RENEW_ATTEMPTS} attempts, using remaining TTL");
+        Ok(TryBecomeLeaderResult::Leader(LeadershipInfo {
+            valid_until_ms: new_valid_until,
+            epoch,
+        }))
     }
 
     /// Release leadership by marking the lock file as expired. Other nodes will
@@ -929,6 +1000,220 @@ mod tests {
         assert!(
             result.is_none(),
             "should be None when lock is expired by time"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_leader_renews_before_expiry() {
+        require_localstack().await;
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let validity_ms: u64 = 10_000;
+        // Seed a lock with less than half the TTL remaining (2s out of 10s)
+        let original_valid_until = now_ms() + 2_000;
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(5),
+            &LockFile {
+                valid_until_ms: original_valid_until,
+                expired: false,
+                node_id: 1,
+                addr: "127.0.0.1:0".parse().unwrap(),
+            },
+        )
+        .await;
+
+        let le = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
+            namespace: ns,
+            leader_election_prefix: None,
+            s3_config: config,
+            validity_millis: Some(validity_ms),
+        })
+        .await;
+
+        let result = le.try_become_leader().await.unwrap();
+        match result {
+            TryBecomeLeaderResult::Leader(info) => {
+                assert_eq!(info.epoch, Epoch(5), "epoch should stay the same");
+                assert!(
+                    info.valid_until_ms > original_valid_until,
+                    "valid_until_ms should be extended: {} > {}",
+                    info.valid_until_ms,
+                    original_valid_until,
+                );
+            }
+            other => panic!("expected Leader, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_renewal_with_ample_remaining() {
+        require_localstack().await;
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let validity_ms: u64 = 10_000;
+        // Seed a lock with plenty of TTL remaining (8s out of 10s)
+        let original_valid_until = now_ms() + 8_000;
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(3),
+            &LockFile {
+                valid_until_ms: original_valid_until,
+                expired: false,
+                node_id: 1,
+                addr: "127.0.0.1:0".parse().unwrap(),
+            },
+        )
+        .await;
+
+        let le = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
+            namespace: ns,
+            leader_election_prefix: None,
+            s3_config: config,
+            validity_millis: Some(validity_ms),
+        })
+        .await;
+
+        let result = le.try_become_leader().await.unwrap();
+        match result {
+            TryBecomeLeaderResult::Leader(info) => {
+                assert_eq!(info.epoch, Epoch(3));
+                assert_eq!(
+                    info.valid_until_ms, original_valid_until,
+                    "should return original valid_until_ms without renewal"
+                );
+            }
+            other => panic!("expected Leader, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_renewal_detects_newer_epoch() {
+        require_localstack().await;
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let validity_ms: u64 = 10_000;
+        // Seed our lock near expiry
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(5),
+            &LockFile {
+                valid_until_ms: now_ms() + 2_000,
+                expired: false,
+                node_id: 1,
+                addr: "127.0.0.1:0".parse().unwrap(),
+            },
+        )
+        .await;
+        // Pre-create epoch 6 for another node
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(6),
+            &LockFile {
+                valid_until_ms: now_ms() + 60_000,
+                expired: false,
+                node_id: 2,
+                addr: "127.0.0.1:0".parse().unwrap(),
+            },
+        )
+        .await;
+
+        let le = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
+            namespace: ns,
+            leader_election_prefix: None,
+            s3_config: config,
+            validity_millis: Some(validity_ms),
+        })
+        .await;
+
+        let result = le.try_become_leader().await.unwrap();
+        assert!(
+            matches!(result, TryBecomeLeaderResult::NotLeader),
+            "should detect newer epoch and return NotLeader: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_renewed_lease_blocks_other_nodes() {
+        require_localstack().await;
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let validity_ms: u64 = 10_000;
+        // Seed a lock near expiry for node 1
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(3),
+            &LockFile {
+                valid_until_ms: now_ms() + 2_000,
+                expired: false,
+                node_id: 1,
+                addr: "127.0.0.1:0".parse().unwrap(),
+            },
+        )
+        .await;
+
+        // Node 1 renews
+        let le1 = LeaderElection::new(LeaderElectionConfig {
+            node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
+            namespace: ns.clone(),
+            leader_election_prefix: None,
+            s3_config: config.clone(),
+            validity_millis: Some(validity_ms),
+        })
+        .await;
+        let result = le1.try_become_leader().await.unwrap();
+        assert!(
+            matches!(result, TryBecomeLeaderResult::Leader(ref info) if info.epoch == Epoch(3)),
+            "node 1 should renew: {result:?}"
+        );
+
+        // Node 2 polls and should see the renewed lease
+        let le2 = LeaderElection::new(LeaderElectionConfig {
+            node_id: 2,
+            addr: "127.0.0.1:0".parse().unwrap(),
+            namespace: ns,
+            leader_election_prefix: None,
+            s3_config: config,
+            validity_millis: Some(validity_ms),
+        })
+        .await;
+        let result = le2.try_become_leader().await.unwrap();
+        assert!(
+            matches!(result, TryBecomeLeaderResult::NotLeader),
+            "node 2 should see renewed lease and return NotLeader: {result:?}"
         );
     }
 }
