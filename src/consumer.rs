@@ -46,9 +46,12 @@ impl Default for ConsumerConfig {
 // I/O thread request/response protocol
 // ---------------------------------------------------------------------------
 
+type FetchResult = Result<Option<Arc<Vec<RecordData>>>>;
+
 struct FetchRequest {
     segment_seq: u64,
-    reply: oneshot::Sender<Result<Option<Arc<Vec<RecordData>>>>>,
+    /// `None` for fire-and-forget prefetch requests.
+    reply: Option<oneshot::Sender<FetchResult>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -59,8 +62,9 @@ struct FetchRequest {
 const FETCH_CHANNEL_CAPACITY: usize = 64;
 
 pub struct PartitionConsumer {
-    request_tx: mpsc::Sender<FetchRequest>,
-    _io_thread: std::thread::JoinHandle<()>,
+    /// Wrapped in `Option` so `Drop` can close the channel before joining the thread.
+    request_tx: Option<mpsc::Sender<FetchRequest>>,
+    io_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl PartitionConsumer {
@@ -93,8 +97,8 @@ impl PartitionConsumer {
 
         info!(%prefix, "partition consumer started");
         Ok(Arc::new(Self {
-            request_tx: tx,
-            _io_thread: io_thread,
+            request_tx: Some(tx),
+            io_thread: Some(io_thread),
         }))
     }
 
@@ -153,9 +157,11 @@ impl PartitionConsumer {
     async fn fetch_segment(&self, seg_seq: u64) -> Result<Option<Arc<Vec<RecordData>>>> {
         let (tx, rx) = oneshot::channel();
         self.request_tx
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("consumer shut down"))?
             .send(FetchRequest {
                 segment_seq: seg_seq,
-                reply: tx,
+                reply: Some(tx),
             })
             .await
             .map_err(|_| anyhow::anyhow!("consumer I/O thread gone"))?;
@@ -163,14 +169,25 @@ impl PartitionConsumer {
             .map_err(|_| anyhow::anyhow!("consumer I/O thread dropped reply"))?
     }
 
-    /// Fire-and-forget prefetch: send the request but drop the reply channel.
-    /// No client-side dedup — the I/O thread's cache handles duplicates.
+    /// Fire-and-forget prefetch. The I/O thread fetches and caches the segment
+    /// but discards the result (no reply channel).
     fn prefetch(&self, seg_seq: u64) {
-        let (tx, _rx) = oneshot::channel();
-        let _ = self.request_tx.try_send(FetchRequest {
-            segment_seq: seg_seq,
-            reply: tx,
-        });
+        if let Some(tx) = self.request_tx.as_ref() {
+            let _ = tx.try_send(FetchRequest {
+                segment_seq: seg_seq,
+                reply: None,
+            });
+        }
+    }
+}
+
+impl Drop for PartitionConsumer {
+    fn drop(&mut self) {
+        // Close the channel first so the I/O loop sees `None` from `recv()` and exits.
+        self.request_tx.take();
+        if let Some(handle) = self.io_thread.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -214,8 +231,11 @@ impl IoState {
             return Ok(Some(Arc::clone(records)));
         }
 
-        // Tier 2: disk cache hit — read file, decode, return.
-        // No memory promotion: these segments are large, let the kernel page cache handle it.
+        // Tier 2: disk cache hit — read from file and decode.
+        // We intentionally skip promoting to the memory tier: these segments exceeded
+        // `disk_threshold_bytes`, so keeping decoded `Vec<RecordData>` in RAM would
+        // defeat the point of spilling. The decode cost is paid on every hit; the
+        // kernel page cache absorbs most of the I/O cost for repeat reads.
         if let Some(path) = self.disk_cache.get(&seg_seq).cloned() {
             if path.exists() {
                 debug!(seg_seq, path = %path.display(), "disk cache hit");
@@ -285,8 +305,9 @@ async fn io_loop(
             .instrument(tracing::debug_span!("fetch_segment", seg_seq))
             .await;
 
-        // If the reply channel was dropped (prefetch with dropped rx), that's fine.
-        let _ = req.reply.send(result);
+        if let Some(reply) = req.reply {
+            let _ = reply.send(result);
+        }
     }
 
     info!("consumer I/O loop exiting");
