@@ -73,7 +73,8 @@
       "Bash(act -p=false --list)",
       "Bash(act --json)",
       "Bash(cargo run:*)",
-      "Bash(act push:*)"
+      "Bash(act push:*)",
+      "Bash(git checkout:*)"
     ],
     "additionalDirectories": [
       "~/.claude/projects/-Users-miles-proj-barka/tool-results"
