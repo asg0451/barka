@@ -158,18 +158,60 @@ async fn topic_list(
     json: bool,
 ) -> Result<()> {
     let s3_client = s3::build_client(s3_config).await;
-    let registry =
-        PartitionRegistry::new(s3_client, s3_config.bucket.clone(), leader_election_prefix);
-    let entries = registry.list().await?;
-    if json {
-        for entry in &entries {
-            println!("{}", serde_json::to_string(entry)?);
+    let registry = PartitionRegistry::new(
+        s3_client.clone(),
+        s3_config.bucket.clone(),
+        leader_election_prefix,
+    );
+    let mut entries = registry.list().await?;
+    entries.sort_by(|a, b| {
+        a.topic
+            .cmp(&b.topic)
+            .then_with(|| a.partition.cmp(&b.partition))
+    });
+
+    if entries.is_empty() {
+        if !json {
+            println!("No partitions registered.");
         }
-    } else if entries.is_empty() {
-        println!("No partitions registered.");
-    } else {
-        for entry in &entries {
-            println!("{}\t{}", entry.topic, entry.partition);
+        return Ok(());
+    }
+
+    for entry in &entries {
+        let namespace = node::leader_namespace(&entry.topic, entry.partition);
+        let leader = leader_election::read_current_leader(
+            &s3_client,
+            &s3_config.bucket,
+            &namespace,
+            leader_election_prefix,
+        )
+        .await?;
+
+        if json {
+            let obj = serde_json::json!({
+                "topic": entry.topic,
+                "partition": entry.partition,
+                "leader": leader.as_ref().map(|l| serde_json::json!({
+                    "node_id": l.node_id,
+                    "addr": l.addr.to_string(),
+                    "epoch": l.epoch.as_u64(),
+                    "valid_until_ms": l.valid_until_ms,
+                })),
+            });
+            println!("{}", serde_json::to_string(&obj)?);
+        } else {
+            match leader {
+                Some(l) => println!(
+                    "{}/{}\tleader={}  node_id={}  epoch={}  valid_until_ms={}",
+                    entry.topic,
+                    entry.partition,
+                    l.addr,
+                    l.node_id,
+                    l.epoch.as_u64(),
+                    l.valid_until_ms,
+                ),
+                None => println!("{}/{}\tno leader", entry.topic, entry.partition),
+            }
         }
     }
     Ok(())
