@@ -47,7 +47,9 @@ impl ProduceRouter {
 
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
-                let exp_ms = BASE_DELAY_MS.saturating_mul(1 << (attempt - 1)).min(MAX_DELAY_MS);
+                let exp_ms = BASE_DELAY_MS
+                    .saturating_mul(1 << (attempt - 1))
+                    .min(MAX_DELAY_MS);
                 let jitter_ms = rand::random::<u64>() % (exp_ms + 1);
                 tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
                 self.cached = None;
