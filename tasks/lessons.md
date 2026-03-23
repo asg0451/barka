@@ -36,6 +36,10 @@ One sentence explaining *why* is enough. Don't write multi-line paragraphs about
 
 Jepsen (and integration tests in general) must use a unique S3 prefix per run. Without it, consumers read stale segments from previous runs, causing spurious failures (unexpected values, duplicates). Always check that test runs can't pollute each other via shared state.
 
+## Don't add backward-compatibility shims
+
+This project has no production deployments. Don't add `#[serde(default)]`, migration code, or other backward-compat scaffolding for format changes. If the format changes, it changes — old data is irrelevant.
+
 ## Don't reuse field names with different semantics
 
 When adding a field to a response struct that means something different from an existing field (e.g., `offset` for produce base offset vs. consume cursor), give it a distinct name (`next_offset`). Don't reuse-and-comment — rename.
