@@ -105,8 +105,11 @@ fn main() -> Result<()> {
                         bucket: cli.s3_bucket.clone(),
                         region: cli.aws_region.clone(),
                     };
-                    let mut router =
-                        barka::produce_router::ProduceRouter::new(&s3_config, cli.leader_election_prefix.clone()).await;
+                    let mut router = barka::produce_router::ProduceRouter::new(
+                        &s3_config,
+                        cli.leader_election_prefix.clone(),
+                    )
+                    .await;
                     let records = router
                         .produce(&cli.topic, cli.partition, values)
                         .await
