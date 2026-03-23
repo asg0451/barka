@@ -25,12 +25,15 @@ jobs:
           DEFAULT_REGION: us-east-1
           EAGER_SERVICE_LOADING: "1"
           DEBUG: "0"
+          LOCALSTACK_ACKNOWLEDGE_ACCOUNT_REQUIREMENT: "1"
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install capnproto
-        run: sudo apt-get update && sudo apt-get install -y capnproto
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list
+          sudo apt-get update && sudo apt-get install -y capnproto
 
       - uses: dtolnay/rust-toolchain@v1
         with:

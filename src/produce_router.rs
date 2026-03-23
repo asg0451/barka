@@ -10,7 +10,8 @@ use crate::rpc::client::ProduceClient;
 use crate::s3::S3Config;
 
 const MAX_RETRIES: u32 = 15;
-const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+const BASE_DELAY_MS: u64 = 200;
+const MAX_DELAY_MS: u64 = 10_000;
 
 pub struct ProduceRouter {
     s3_client: aws_sdk_s3::Client,
@@ -54,7 +55,11 @@ impl ProduceRouter {
 
         for attempt in 0..=MAX_RETRIES {
             if attempt > 0 {
-                tokio::time::sleep(RETRY_DELAY).await;
+                let exp_ms = BASE_DELAY_MS
+                    .saturating_mul(1 << (attempt - 1))
+                    .min(MAX_DELAY_MS);
+                let jitter_ms = rand::random::<u64>() % (exp_ms + 1);
+                tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
                 self.cached = None;
             }
 
