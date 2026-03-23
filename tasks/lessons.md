@@ -23,3 +23,7 @@ When adding epoch/leadership gating, consider what happens to in-flight work whe
 ## Run clippy before pushing
 
 CI runs `cargo clippy -- -D warnings`. Run it locally before committing to avoid a round-trip failure.
+
+## Keep inline comments brief
+
+One sentence explaining *why* is enough. Don't write multi-line paragraphs about the protocol, alternatives, or future work in code comments. If it needs more than a line or two, it belongs in the PR description or docs, not inline.
