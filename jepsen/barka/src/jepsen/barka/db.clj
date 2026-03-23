@@ -144,13 +144,17 @@
                     #(tcp-reachable? "127.0.0.1" consume-rpc-port 100)
                     100 50)
 
-          ;; 3. jepsen-gateway
+          ;; 3. jepsen-gateway (discovers produce leader via S3)
           (let [log-file (java.io.File. (str log-dir "/jepsen-gateway.log"))
                 proc     (start-process
                            [(bin-path opts "jepsen-gateway")]
                            {"BARKA_JEPSEN_LISTEN_ADDR"  (str "127.0.0.1:" gw-port)
-                            "BARKA_PRODUCE_RPC_ADDR"    (str "127.0.0.1:" produce-rpc-port)
                             "BARKA_CONSUME_RPC_ADDR"    (str "127.0.0.1:" consume-rpc-port)
+                            "BARKA_S3_ENDPOINT"         localstack-endpoint
+                            "BARKA_S3_BUCKET"           "barka"
+                            "BARKA_AWS_REGION"          "us-east-1"
+                            "AWS_ACCESS_KEY_ID"         "test"
+                            "AWS_SECRET_ACCESS_KEY"     "test"
                             "RUST_LOG"                  "barka=debug"
                             "RUST_BACKTRACE"            "1"}
                            log-file)]

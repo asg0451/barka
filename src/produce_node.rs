@@ -2,7 +2,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use crate::leader_election::{LeaderElection, LeaderElectionConfig, TryBecomeLeaderResult};
+use crate::leader_election::{
+    LeaderElection, LeaderElectionConfig, TryBecomeLeaderResult, leader_namespace,
+};
 use crate::node::segment_key_prefix;
 use crate::producer::PartitionProducer;
 use crate::rpc::server::serve_produce_rpc;
@@ -160,7 +162,8 @@ impl ProduceNode {
 
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: self.config.node_id,
-            namespace: "test-0".into(),
+            addr: self.config.rpc_addr.to_string(),
+            namespace: leader_namespace("test", 0),
             s3_config: self.s3_config.clone(),
             validity_millis: None,
         })
