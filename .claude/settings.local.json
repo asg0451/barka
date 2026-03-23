@@ -21,7 +21,9 @@
       "Bash(command -v minio)",
       "Bash(docker info:*)",
       "Bash(podman info:*)",
-      "Bash(make localstack:*)"
+      "Bash(make localstack:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo fmt:*)"
     ]
   }
 }

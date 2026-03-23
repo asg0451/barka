@@ -46,6 +46,10 @@ struct Cli {
     /// Milliseconds to wait before flushing a non-full batch (default if flag omitted: production default).
     #[arg(long, env = "BARKA_PRODUCER_LINGER_MS")]
     producer_linger_ms: Option<u64>,
+
+    /// Seconds between leader-election attempts in the background loop.
+    #[arg(long, env = "BARKA_LEADER_ELECTION_POLL_SECS", default_value_t = 3)]
+    leader_election_poll_secs: u64,
 }
 
 impl Cli {
@@ -74,6 +78,7 @@ impl Cli {
             jepsen_gateway_addr: SocketAddr::new(self.bind, self.jepsen_gateway_port),
             s3_prefix: self.s3_prefix.clone(),
             producer_limits,
+            leader_election_poll_secs: self.leader_election_poll_secs,
         }
     }
 

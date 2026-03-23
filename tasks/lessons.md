@@ -1,0 +1,21 @@
+# Lessons
+
+## Don't skip LocalStack tests
+
+The LocalStack-dependent tests in this repo are the core test suite, not optional integration tests. Don't filter them out with `--skip`. If LocalStack is expected to be running (and it is for this project), run the full suite.
+
+## Update lessons.md immediately on correction
+
+When the user corrects something (rejects a tool call, says "don't do X"), update this file right then — not at the end, not when prompted. The self-improvement loop only works if it's reflexive.
+
+## Branch before working
+
+Always create a feature branch before making any code changes. Never work directly on master. This should happen before the first edit, not after all the work is done.
+
+## Follow the full workflow, not just the code
+
+The task isn't just "write the code." It includes: branch, implement, test, commit, PR. Don't wait for the user to remind you about the non-coding steps.
+
+## Think through concurrency invariants before implementing
+
+When adding epoch/leadership gating, consider what happens to in-flight work when state changes. Don't just gate the entry point — ensure the invariant holds through the entire operation (accept → batch → flush → S3 write).
