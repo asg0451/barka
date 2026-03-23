@@ -203,10 +203,15 @@ impl ProduceNode {
             .partitions
             .iter()
             .map(|((topic, partition), state)| {
+                let namespace = leader_namespace(topic, *partition);
+                let span_prefix = match self.config.leader_election_prefix.as_deref() {
+                    Some(prefix) => format!("{}/{}", prefix.trim_matches('/'), namespace),
+                    None => namespace.clone(),
+                };
                 let cfg = LeaderElectionConfig {
                     node_id: self.config.node_id,
                     addr: self.config.rpc_addr.to_string(),
-                    namespace: leader_namespace(topic, *partition),
+                    namespace,
                     leader_election_prefix: self.config.leader_election_prefix.clone(),
                     s3_config: self.s3_config.clone(),
                     validity_millis: None,
@@ -215,7 +220,7 @@ impl ProduceNode {
                 let producer = Arc::clone(&state.producer);
                 async move {
                     let le = LeaderElection::new(cfg).await;
-                    (le, leadership, producer)
+                    (le, leadership, producer, span_prefix)
                 }
             })
             .collect();
@@ -223,8 +228,8 @@ impl ProduceNode {
         let inited = futures::future::join_all(le_init_futs).await;
         let leader_handles: Vec<_> = inited
             .into_iter()
-            .map(|(le, leadership, producer)| {
-                tokio::spawn(run_leader_loop(le, leadership, producer, poll))
+            .map(|(le, leadership, producer, span_prefix)| {
+                tokio::spawn(run_leader_loop(le, leadership, producer, poll, span_prefix))
             })
             .collect();
 
@@ -240,11 +245,13 @@ impl ProduceNode {
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(prefix = %span_prefix), err)]
 async fn run_leader_loop(
     le: LeaderElection,
     state: Arc<LeadershipState>,
     producer: Arc<PartitionProducer>,
     poll_interval: Duration,
+    span_prefix: String,
 ) -> anyhow::Result<()> {
     let mut prev_epoch: Option<u64> = None;
     loop {

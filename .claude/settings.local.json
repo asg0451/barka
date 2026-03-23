@@ -61,7 +61,13 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(RUST_LOG=info timeout 3 ./target/debug/produce-node)",
+      "Bash(act --list)",
+      "Bash(act -p=false --list)",
+      "Bash(act --json)",
+      "Bash(cargo run:*)",
+      "Bash(act push:*)"
     ]
   }
 }
