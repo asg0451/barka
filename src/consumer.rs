@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use bytes::Bytes;
 use lru::LruCache;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{Instrument, debug, info, warn};
@@ -240,7 +241,7 @@ impl IoState {
             if path.exists() {
                 debug!(seg_seq, path = %path.display(), "disk cache hit");
                 let buf = tokio::fs::read(&path).await?;
-                let (_epoch, records) = segment::decode(&buf)?;
+                let (_epoch, records) = segment::decode(Bytes::from(buf))?;
                 return Ok(Some(Arc::new(records)));
             }
             // Stale entry — file was removed externally.
@@ -257,7 +258,7 @@ impl IoState {
         };
         let raw_len = buf.len();
 
-        let (_epoch, records) = segment::decode(&buf)?;
+        let (_epoch, records) = segment::decode(buf.clone())?;
         let records = Arc::new(records);
 
         // Classify by size and cache appropriately

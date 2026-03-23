@@ -1,11 +1,17 @@
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::rc::Rc;
 
+use bytes::Bytes;
 use capnp_rpc::{RpcSystem, rpc_twoparty_capnp, twoparty};
 use futures::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncReadCompatExt;
 
 use crate::rpc::barka_capnp::{consume_svc, produce_svc};
+use crate::rpc::bytes_transport::{BytesVatNetwork, MessageBytesQueue};
+use crate::segment::RecordData;
 
 /// Cap'n Proto RPC client for produce operations. Must be used within a tokio LocalSet.
 pub struct ProduceClient {
@@ -75,9 +81,14 @@ impl ProduceClient {
     }
 }
 
-/// Cap'n Proto RPC client for consume operations. Must be used within a tokio LocalSet.
+/// Cap'n Proto RPC client for consume operations. Uses [`BytesVatNetwork`] so
+/// that response key/value data can be zero-copy `slice_ref`'d into `Bytes`,
+/// mirroring the produce server's approach for incoming requests.
+///
+/// Must be used within a tokio LocalSet.
 pub struct ConsumeClient {
     client: consume_svc::Client,
+    return_queue: MessageBytesQueue,
 }
 
 impl ConsumeClient {
@@ -86,11 +97,14 @@ impl ConsumeClient {
         let stream = stream.compat();
         let (reader, writer) = stream.split();
 
-        let network = twoparty::VatNetwork::new(
+        let return_queue: MessageBytesQueue = Rc::new(RefCell::new(VecDeque::new()));
+        let network = BytesVatNetwork::new(
             futures::io::BufReader::new(reader),
             futures::io::BufWriter::new(writer),
             rpc_twoparty_capnp::Side::Client,
             Default::default(),
+            None,
+            Some(return_queue.clone()),
         );
 
         let mut rpc = RpcSystem::new(Box::new(network), None);
@@ -102,7 +116,10 @@ impl ConsumeClient {
             }
         });
 
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            return_queue,
+        })
     }
 
     pub async fn consume(
@@ -111,7 +128,7 @@ impl ConsumeClient {
         partition: u32,
         offset: u64,
         max_records: u32,
-    ) -> anyhow::Result<Vec<crate::log::record::Record>> {
+    ) -> anyhow::Result<Vec<RecordData>> {
         let mut req = self.client.consume_request();
         let mut builder = req.get().get_request()?;
         builder.set_topic(topic);
@@ -119,17 +136,31 @@ impl ConsumeClient {
         builder.set_offset(offset);
         builder.set_max_records(max_records);
         let response = req.send().promise.await?;
+
+        let raw = self
+            .return_queue
+            .borrow_mut()
+            .pop_front()
+            .ok_or_else(|| anyhow::anyhow!("missing return message bytes"))?;
+
         let records = response.get()?.get_response()?.get_records()?;
         let mut out = Vec::with_capacity(records.len() as usize);
         for r in records.iter() {
-            out.push(crate::log::record::Record {
-                key: {
-                    let k = r.get_key()?;
-                    if k.is_empty() { None } else { Some(k.to_vec()) }
-                },
-                value: r.get_value()?.to_vec(),
+            let key_slice = r.get_key()?;
+            let value_slice = r.get_value()?;
+            out.push(RecordData {
                 offset: r.get_offset(),
                 timestamp: r.get_timestamp(),
+                key: if key_slice.is_empty() {
+                    Bytes::new()
+                } else {
+                    raw.slice_ref(key_slice)
+                },
+                value: if value_slice.is_empty() {
+                    Bytes::new()
+                } else {
+                    raw.slice_ref(value_slice)
+                },
             });
         }
         Ok(out)

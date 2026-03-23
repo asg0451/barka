@@ -1,11 +1,14 @@
-// TODO: revisit whether this custom transport is worth the maintenance cost.
 // We fork capnp-rpc's twoparty read path to read into Bytes (refcounted)
 // instead of Vec<Word> (owned, aligned). This enables zero-copy slice_ref
-// sub-slicing of key/value data in the producer, at the cost of:
-//   - ~260 lines mirroring capnp-rpc internals (pinned to 0.25 API)
+// sub-slicing of key/value data:
+//   - Produce server: incoming Call messages → handler pops and slice_ref's
+//     key/value from the request.
+//   - Consume client: incoming Return messages → client pops and slice_ref's
+//     key/value from the response.
+// Cost:
+//   - ~280 lines mirroring capnp-rpc internals (pinned to 0.25 API)
 //   - requiring capnp's "unaligned" feature (slightly slower field reads)
 //   - implicit ordering assumption on the per-connection VecDeque
-// If the zero-copy constraint relaxes, drop this and use stock twoparty.
 
 use bytes::{Bytes, BytesMut};
 use capnp::capability::Promise;
@@ -22,8 +25,8 @@ use futures::channel::oneshot;
 
 pub type VatId = capnp_rpc::rpc_twoparty_capnp::Side;
 
-/// Per-connection queue of raw `Bytes` for Call messages. The transport
-/// pushes; the per-connection server handler pops.
+/// Per-connection queue of raw `Bytes` for RPC messages. The transport
+/// pushes; the handler/client pops.
 pub type MessageBytesQueue = Rc<RefCell<VecDeque<Bytes>>>;
 
 // ---------------------------------------------------------------------------
@@ -124,6 +127,17 @@ fn is_call_message(bytes: &Bytes, options: ReaderOptions) -> bool {
     matches!(body.which(), Ok(rpc_capnp::message::Call(_)))
 }
 
+fn is_return_message(bytes: &Bytes, options: ReaderOptions) -> bool {
+    let Ok(segments) = BufferSegments::new(bytes.clone(), options) else {
+        return false;
+    };
+    let reader = capnp::message::Reader::new(segments, options);
+    let Ok(body) = reader.get_root::<rpc_capnp::message::Reader<'_>>() else {
+        return false;
+    };
+    matches!(body.which(), Ok(rpc_capnp::message::Return(_)))
+}
+
 // ---------------------------------------------------------------------------
 // Outgoing message (delegates to capnp_futures::Sender, unchanged)
 // ---------------------------------------------------------------------------
@@ -179,7 +193,8 @@ struct ConnectionInner<T: AsyncRead + 'static> {
     side: VatId,
     receive_options: ReaderOptions,
     on_disconnect_fulfiller: Option<oneshot::Sender<()>>,
-    call_bytes_queue: MessageBytesQueue,
+    call_bytes_queue: Option<MessageBytesQueue>,
+    return_bytes_queue: Option<MessageBytesQueue>,
 }
 
 impl<T: AsyncRead> Drop for ConnectionInner<T> {
@@ -219,7 +234,8 @@ impl<T: AsyncRead + Unpin> capnp_rpc::Connection<VatId> for Connection<T> {
         let maybe_input_stream = inner.input_stream.borrow_mut().take();
         let return_it_here = inner.input_stream.clone();
         let receive_options = inner.receive_options;
-        let queue = inner.call_bytes_queue.clone();
+        let call_queue = inner.call_bytes_queue.clone();
+        let return_queue = inner.return_bytes_queue.clone();
 
         match maybe_input_stream {
             Some(mut s) => Promise::from_future(async move {
@@ -228,8 +244,15 @@ impl<T: AsyncRead + Unpin> capnp_rpc::Connection<VatId> for Connection<T> {
                 match maybe_bytes {
                     None => Ok(None),
                     Some(bytes) => {
-                        if is_call_message(&bytes, receive_options) {
-                            queue.borrow_mut().push_back(bytes.clone());
+                        if let Some(ref q) = call_queue
+                            && is_call_message(&bytes, receive_options)
+                        {
+                            q.borrow_mut().push_back(bytes.clone());
+                        }
+                        if let Some(ref q) = return_queue
+                            && is_return_message(&bytes, receive_options)
+                        {
+                            q.borrow_mut().push_back(bytes.clone());
                         }
                         let segments = BufferSegments::new(bytes, receive_options)?;
                         let reader = capnp::message::Reader::new(segments, receive_options);
@@ -258,7 +281,6 @@ pub struct BytesVatNetwork<T: AsyncRead + 'static + Unpin> {
     weak_connection_inner: Weak<RefCell<ConnectionInner<T>>>,
     execution_driver: futures::future::Shared<Promise<(), capnp::Error>>,
     side: VatId,
-    call_bytes_queue: MessageBytesQueue,
 }
 
 impl<T: AsyncRead + Unpin> BytesVatNetwork<T> {
@@ -267,7 +289,8 @@ impl<T: AsyncRead + Unpin> BytesVatNetwork<T> {
         output_stream: U,
         side: VatId,
         receive_options: ReaderOptions,
-        call_bytes_queue: MessageBytesQueue,
+        call_bytes_queue: Option<MessageBytesQueue>,
+        return_bytes_queue: Option<MessageBytesQueue>,
     ) -> Self
     where
         U: AsyncWrite + 'static + Unpin,
@@ -295,7 +318,8 @@ impl<T: AsyncRead + Unpin> BytesVatNetwork<T> {
             side,
             receive_options,
             on_disconnect_fulfiller: Some(fulfiller),
-            call_bytes_queue: call_bytes_queue.clone(),
+            call_bytes_queue,
+            return_bytes_queue,
         }));
 
         let weak_inner = Rc::downgrade(&inner);
@@ -305,12 +329,7 @@ impl<T: AsyncRead + Unpin> BytesVatNetwork<T> {
             weak_connection_inner: weak_inner,
             execution_driver,
             side,
-            call_bytes_queue,
         }
-    }
-
-    pub fn call_bytes_queue(&self) -> &MessageBytesQueue {
-        &self.call_bytes_queue
     }
 }
 
