@@ -27,3 +27,11 @@ CI runs `cargo clippy -- -D warnings`. Run it locally before committing to avoid
 ## Keep inline comments brief
 
 One sentence explaining *why* is enough. Don't write multi-line paragraphs about the protocol, alternatives, or future work in code comments. If it needs more than a line or two, it belongs in the PR description or docs, not inline.
+
+## Test isolation: unique S3 prefixes
+
+Jepsen (and integration tests in general) must use a unique S3 prefix per run. Without it, consumers read stale segments from previous runs, causing spurious failures (unexpected values, duplicates). Always check that test runs can't pollute each other via shared state.
+
+## Don't reuse field names with different semantics
+
+When adding a field to a response struct that means something different from an existing field (e.g., `offset` for produce base offset vs. consume cursor), give it a distinct name (`next_offset`). Don't reuse-and-comment — rename.

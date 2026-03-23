@@ -55,7 +55,12 @@
       "Bash(gh run view:*)",
       "Bash(gh run watch:*)",
       "Bash(gh auth status:*)",
-      "Bash(gh status:*)"
+      "Bash(gh status:*)",
+      "Bash(docker ps:*)",
+      "Bash(CLASSPATH= lein run test --barka-bin /Users/miles/proj/barka/target/debug/barka)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }
