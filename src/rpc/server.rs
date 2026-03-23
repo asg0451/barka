@@ -90,7 +90,11 @@ impl produce_svc::Server for PerConnectionProduceNode {
         let req = params.get()?.get_request()?;
         let key = (req.get_topic()?.to_string()?, req.get_partition());
 
-        let state = self.partitions.get(&key).ok_or_else(|| {
+        let state = {
+            let map = self.partitions.read().unwrap();
+            map.get(&key).cloned()
+        };
+        let state = state.ok_or_else(|| {
             capnp::Error::failed(format!(
                 "partition {}/{} not configured on this node",
                 key.0, key.1
@@ -317,7 +321,7 @@ mod tests {
                 leadership: Arc::clone(&leadership),
             },
         );
-        (Arc::new(map), leadership)
+        (Arc::new(std::sync::RwLock::new(map)), leadership)
     }
 
     fn make_consume_node(s3_config: &S3Config, s3_prefix: &str) -> PerConnectionConsumeNode {
