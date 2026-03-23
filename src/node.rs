@@ -97,6 +97,12 @@ pub struct LeadershipState {
     inner: RwLock<LeadershipInner>,
 }
 
+impl Default for LeadershipState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LeadershipState {
     pub fn new() -> Self {
         Self {

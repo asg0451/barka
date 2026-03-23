@@ -175,13 +175,13 @@ impl FlushRound {
         s3_client: &Client,
         leadership: Option<&LeadershipState>,
     ) -> Result<()> {
-        if let Some(ls) = leadership {
-            if ls.check_leader() != Some(self.epoch) {
-                anyhow::bail!(
-                    "leadership lost or epoch changed before flush (expected epoch {})",
-                    self.epoch
-                );
-            }
+        if let Some(ls) = leadership
+            && ls.check_leader() != Some(self.epoch)
+        {
+            anyhow::bail!(
+                "leadership lost or epoch changed before flush (expected epoch {})",
+                self.epoch
+            );
         }
         let mut records = {
             let mut guard = self.records.lock().unwrap();
