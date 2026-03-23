@@ -5,13 +5,17 @@ use std::io::{self, Read};
 use std::path::PathBuf;
 
 use anyhow::Context;
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use barka::segment;
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use clap::Parser;
 use serde::Serialize;
 
 #[derive(Parser)]
-#[command(name = "barka-segment", version, about = "Parse barka segment files to JSON")]
+#[command(
+    name = "barka-segment",
+    version,
+    about = "Parse barka segment files to JSON"
+)]
 struct Cli {
     /// Input segment file, or `-` for stdin (default).
     #[arg(value_name = "FILE", default_value = "-")]
@@ -56,9 +60,7 @@ struct JsonSegment {
 fn read_input(path: &PathBuf) -> anyhow::Result<Vec<u8>> {
     if path.as_os_str() == "-" {
         let mut buf = Vec::new();
-        io::stdin()
-            .read_to_end(&mut buf)
-            .context("read stdin")?;
+        io::stdin().read_to_end(&mut buf).context("read stdin")?;
         Ok(buf)
     } else {
         fs::read(path).with_context(|| format!("read {}", path.display()))

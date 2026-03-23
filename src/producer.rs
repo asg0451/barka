@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{oneshot, watch};
-use tracing::{warn, Instrument};
+use tracing::{Instrument, warn};
 
 use crate::{
     log_offset::{self, compose},
@@ -279,8 +279,7 @@ impl PartitionProducer {
     ) -> Result<Arc<Self>> {
         let s3_client = crate::s3::build_client(s3_config).await;
         let bucket = s3_config.bucket.clone();
-        let next_sequence =
-            discover_next_segment_sequence(&s3_client, &bucket, &prefix).await?;
+        let next_sequence = discover_next_segment_sequence(&s3_client, &bucket, &prefix).await?;
         let producer = Arc::new(Self {
             bucket,
             s3_client,
@@ -512,10 +511,9 @@ mod tests {
                 .as_nanos(),
             TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
         );
-        let next_sequence =
-            discover_next_segment_sequence(&s3_client, &config.bucket, &prefix)
-                .await
-                .unwrap();
+        let next_sequence = discover_next_segment_sequence(&s3_client, &config.bucket, &prefix)
+            .await
+            .unwrap();
         PartitionProducer {
             s3_client,
             bucket: config.bucket,

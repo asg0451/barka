@@ -318,9 +318,8 @@ mod tests {
                 local
                     .run_until(async {
                         let client = BarkaClient::connect(addr).await.unwrap();
-                        let values: Vec<Vec<u8>> = (0..N)
-                            .map(|i| format!("rec-{i}").into_bytes())
-                            .collect();
+                        let values: Vec<Vec<u8>> =
+                            (0..N).map(|i| format!("rec-{i}").into_bytes()).collect();
                         let recs = client
                             .produce("default-limits-topic", 0, values.clone())
                             .await

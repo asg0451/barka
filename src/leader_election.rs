@@ -115,15 +115,16 @@ impl LeaderElection {
                 let newest = contents.last().unwrap();
                 let key = newest.key().unwrap();
                 last_epoch = Some(Epoch::from_key(key)?);
-                let reader = match s3::get_object_reader_if_present(&self.s3_client, &self.bucket, key)
-                    .await?
-                {
-                    Some(r) => r,
-                    None => {
-                        tracing::debug!("lock file removed between list and get, retrying");
-                        continue;
-                    }
-                };
+                let reader =
+                    match s3::get_object_reader_if_present(&self.s3_client, &self.bucket, key)
+                        .await?
+                    {
+                        Some(r) => r,
+                        None => {
+                            tracing::debug!("lock file removed between list and get, retrying");
+                            continue;
+                        }
+                    };
                 let lock_file: LockFile =
                     serde_json::from_reader(reader).context("deserialize lock file")?;
                 // TODO: check if valid_until_ms is in the past too
@@ -174,8 +175,13 @@ impl LeaderElection {
                 .filter_map(|obj| obj.key().map(str::to_owned))
                 .collect();
 
-            return match s3::put_if_absent(&self.s3_client, &self.bucket, &key, lock_file_body.into())
-                .await?
+            return match s3::put_if_absent(
+                &self.s3_client,
+                &self.bucket,
+                &key,
+                lock_file_body.into(),
+            )
+            .await?
             {
                 PutOutcome::Created => {
                     tracing::info!(epoch = epoch.0, "became leader");
