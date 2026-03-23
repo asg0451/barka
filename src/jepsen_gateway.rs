@@ -30,6 +30,7 @@ pub async fn serve(
     consume_rpc_addr: SocketAddr,
     listen_addr: SocketAddr,
     s3_config: S3Config,
+    leader_election_prefix: Option<String>,
 ) -> anyhow::Result<()> {
     let local = tokio::task::LocalSet::new();
     local
@@ -46,8 +47,11 @@ pub async fn serve(
                 info!(%remote, "jepsen gateway connection");
 
                 let s3_config = s3_config.clone();
+                let le_prefix = leader_election_prefix.clone();
                 tokio::task::spawn_local(async move {
-                    if let Err(e) = run_session(stream, consume_rpc_addr, s3_config).await {
+                    if let Err(e) =
+                        run_session(stream, consume_rpc_addr, s3_config, le_prefix).await
+                    {
                         error!(%e, "jepsen gateway session ended with error");
                     }
                 });
@@ -60,8 +64,9 @@ async fn run_session(
     stream: tokio::net::TcpStream,
     consume_rpc_addr: SocketAddr,
     s3_config: S3Config,
+    leader_election_prefix: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut produce = ProduceRouter::new(&s3_config, None).await;
+    let mut produce = ProduceRouter::new(&s3_config, leader_election_prefix).await;
     let mut consume_client = connect_consume_with_retry(consume_rpc_addr).await?;
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();

@@ -8,6 +8,7 @@ pub mod lease;
 pub mod log;
 pub mod log_offset;
 pub mod node;
+pub mod partition_registry;
 pub mod produce_node;
 pub mod produce_router;
 pub mod producer;

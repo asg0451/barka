@@ -3,6 +3,6 @@
 - [ ] implement a mechanism for a leader to retain its control most of the time. possibly by bumping the epoch and re-claiming it early?
 - [X] try and make consume as zero copy as possible, like produce
 - [X] add support for multiple topics and partitions
-- [ ] add support for on the fly topic/partition creation
+- [X] add support for on the fly topic/partition creation
 - [ ] make a more sophisticated client which can examing topic-partition leadership state to route produce requests to the appropriate node, taking expiry and retries into account.
 - [ ] add a service that examines topic-partition leadership state and forces rebalances if the load is uneven
