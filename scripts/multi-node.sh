@@ -29,11 +29,14 @@ trap cleanup INT TERM
 echo "starting $NUM_NODES produce-nodes + 1 consume-node (s3-prefix=$S3_PREFIX)"
 echo ""
 
+# tracing default target is the binary crate (e.g. produce_node), not the library `barka`.
+RUST_LOG_BINARIES="barka=info,produce_node=info,consume_node=info"
+
 for i in $(seq 0 $((NUM_NODES - 1))); do
     rpc_port=$((BASE_PRODUCE_PORT + i))
     echo "produce-node $i: rpc=:$rpc_port"
 
-    RUST_LOG=barka=info RUST_BACKTRACE=1 \
+    RUST_LOG="$RUST_LOG_BINARIES" RUST_BACKTRACE=1 \
         ./target/debug/produce-node \
         --node-id "$i" \
         --rpc-port "$rpc_port" \
@@ -45,7 +48,7 @@ done
 
 echo "consume-node: rpc=:$CONSUME_PORT"
 
-RUST_LOG=barka=info RUST_BACKTRACE=1 \
+RUST_LOG="$RUST_LOG_BINARIES" RUST_BACKTRACE=1 \
     ./target/debug/consume-node \
     --rpc-port "$CONSUME_PORT" \
     --s3-endpoint "$S3_ENDPOINT" \

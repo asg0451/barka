@@ -4,6 +4,7 @@ use barka::produce_node::{ProduceNode, ProduceNodeConfig, ProducerBatchLimits, T
 use barka::producer;
 use barka::s3::{self, S3Config};
 use clap::Parser;
+use tracing::Instrument;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -135,11 +136,18 @@ async fn main() -> anyhow::Result<()> {
         .with_span_events(FmtSpan::CLOSE)
         .init();
 
+    let pid = std::process::id();
+    let root = tracing::info_span!("produce-node", pid);
+    run(pid).instrument(root).await
+}
+
+async fn run(pid: u32) -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = cli.node_config();
     let s3_config = cli.s3_config();
 
     tracing::info!(
+        pid,
         node_id = config.node_id,
         rpc_addr = %config.rpc_addr,
         topics = ?config.topics,

@@ -3,6 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use barka::consume_node::{ConsumeNode, ConsumeNodeConfig};
 use barka::s3::{self, S3Config};
 use clap::Parser;
+use tracing::Instrument;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -52,11 +53,18 @@ async fn main() -> anyhow::Result<()> {
         .with_span_events(FmtSpan::CLOSE)
         .init();
 
+    let pid = std::process::id();
+    let root = tracing::info_span!("consume-node", pid);
+    run(pid).instrument(root).await
+}
+
+async fn run(pid: u32) -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = cli.node_config();
     let s3_config = cli.s3_config();
 
     tracing::info!(
+        pid,
         rpc_addr = %config.rpc_addr,
         s3_endpoint = s3_config.endpoint_url.as_deref().unwrap_or("aws"),
         s3_bucket = %s3_config.bucket,

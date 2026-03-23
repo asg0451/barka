@@ -45,6 +45,7 @@ impl ProduceRouter {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip(self), fields(topic, partition, namespace, attempt, num_values = values.len()), err)]
     pub async fn produce(
         &mut self,
         topic: &str,
@@ -90,6 +91,8 @@ impl ProduceRouter {
                     }
                     Err(e) => return Err(e).context("read current leader"),
                 };
+
+                tracing::debug!(leader_node_id = leader.node_id, leader_addr = %leader.addr, "leader found");
 
                 let need_reconnect = self.cached.as_ref().is_none_or(|c| c.addr != leader.addr);
 

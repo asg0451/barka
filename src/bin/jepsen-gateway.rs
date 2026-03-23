@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
+use tracing::Instrument;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -45,20 +46,30 @@ fn main() -> anyhow::Result<()> {
         region: cli.aws_region,
     };
 
-    tracing::info!(
-        listen_addr = %cli.listen_addr,
-        consume_rpc_addr = %cli.consume_rpc_addr,
-        "starting jepsen-gateway",
-    );
+    let pid = std::process::id();
+    let root = tracing::info_span!("jepsen-gateway", pid);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    rt.block_on(barka::jepsen_gateway::serve(
-        cli.consume_rpc_addr,
-        cli.listen_addr,
-        s3_config,
-        cli.leader_election_prefix,
-    ))
+    rt.block_on(
+        async move {
+            tracing::info!(
+                pid,
+                listen_addr = %cli.listen_addr,
+                consume_rpc_addr = %cli.consume_rpc_addr,
+                "starting jepsen-gateway",
+            );
+
+            barka::jepsen_gateway::serve(
+                cli.consume_rpc_addr,
+                cli.listen_addr,
+                s3_config,
+                cli.leader_election_prefix,
+            )
+            .await
+        }
+        .instrument(root),
+    )
 }

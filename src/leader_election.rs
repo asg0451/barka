@@ -342,6 +342,12 @@ pub struct CurrentLeader {
     pub epoch: Epoch,
 }
 
+#[tracing::instrument(
+    level = "debug",
+    skip_all,
+    fields(namespace, leader_election_prefix),
+    err
+)]
 pub async fn read_current_leader(
     s3_client: &aws_sdk_s3::Client,
     bucket: &str,
