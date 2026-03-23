@@ -139,40 +139,44 @@ pub struct ProduceNode {
 impl ProduceNode {
     pub async fn new(config: ProduceNodeConfig, s3_config: &S3Config) -> anyhow::Result<Self> {
         let base_prefix = segment_key_prefix(config.s3_prefix.as_deref());
-        let mut partitions = HashMap::new();
 
+        let mut init_futs = Vec::new();
         for tc in &config.topics {
             for p in 0..tc.partitions {
                 let pp = partition_data_prefix(&base_prefix, &tc.topic, p);
                 let leadership = Arc::new(LeadershipState::new());
-                let producer = match config.producer_limits.as_ref() {
-                    Some(l) => {
-                        PartitionProducer::with_opts(
-                            s3_config,
-                            pp,
-                            l.max_records,
-                            l.max_bytes,
-                            l.linger(),
-                            Arc::clone(&leadership),
-                        )
-                        .await?
-                    }
-                    None => PartitionProducer::new(s3_config, pp, Arc::clone(&leadership)).await?,
-                };
-                tracing::info!(
-                    topic = %tc.topic,
-                    partition = p,
-                    "initialized partition producer",
-                );
-                partitions.insert(
-                    (tc.topic.clone(), p),
-                    PartitionProduceState {
-                        producer,
-                        leadership,
-                    },
-                );
+                let topic = tc.topic.clone();
+                let limits = config.producer_limits.clone();
+                let s3 = s3_config.clone();
+                init_futs.push(async move {
+                    let producer = match limits.as_ref() {
+                        Some(l) => {
+                            PartitionProducer::with_opts(
+                                &s3,
+                                pp,
+                                l.max_records,
+                                l.max_bytes,
+                                l.linger(),
+                                Arc::clone(&leadership),
+                            )
+                            .await?
+                        }
+                        None => PartitionProducer::new(&s3, pp, Arc::clone(&leadership)).await?,
+                    };
+                    tracing::info!(topic = %topic, partition = p, "initialized partition producer");
+                    Ok::<_, anyhow::Error>((
+                        (topic, p),
+                        PartitionProduceState {
+                            producer,
+                            leadership,
+                        },
+                    ))
+                });
             }
         }
+
+        let results = futures::future::try_join_all(init_futs).await?;
+        let partitions: HashMap<_, _> = results.into_iter().collect();
 
         Ok(Self {
             config,
@@ -194,24 +198,34 @@ impl ProduceNode {
         });
 
         let poll = Duration::from_secs(self.config.leader_election_poll_secs);
-        let mut leader_handles = Vec::new();
 
-        for ((topic, partition), state) in self.partitions.iter() {
-            let ns = leader_namespace(topic, *partition);
-            let le = LeaderElection::new(LeaderElectionConfig {
-                node_id: self.config.node_id,
-                namespace: ns,
-                leader_election_prefix: self.config.leader_election_prefix.clone(),
-                s3_config: self.s3_config.clone(),
-                validity_millis: None,
+        let le_init_futs: Vec<_> = self
+            .partitions
+            .iter()
+            .map(|((topic, partition), state)| {
+                let cfg = LeaderElectionConfig {
+                    node_id: self.config.node_id,
+                    namespace: leader_namespace(topic, *partition),
+                    leader_election_prefix: self.config.leader_election_prefix.clone(),
+                    s3_config: self.s3_config.clone(),
+                    validity_millis: None,
+                };
+                let leadership = Arc::clone(&state.leadership);
+                let producer = Arc::clone(&state.producer);
+                async move {
+                    let le = LeaderElection::new(cfg).await;
+                    (le, leadership, producer)
+                }
             })
-            .await;
-            let leadership = Arc::clone(&state.leadership);
-            let producer = Arc::clone(&state.producer);
-            leader_handles.push(tokio::spawn(run_leader_loop(
-                le, leadership, producer, poll,
-            )));
-        }
+            .collect();
+
+        let inited = futures::future::join_all(le_init_futs).await;
+        let leader_handles: Vec<_> = inited
+            .into_iter()
+            .map(|(le, leadership, producer)| {
+                tokio::spawn(run_leader_loop(le, leadership, producer, poll))
+            })
+            .collect();
 
         tokio::select! {
             _ = tokio::task::spawn_blocking(move || rpc_handle.join().unwrap()) => {},
