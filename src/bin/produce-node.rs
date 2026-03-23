@@ -1,11 +1,38 @@
 use std::net::{IpAddr, SocketAddr};
 
-use barka::produce_node::{ProduceNode, ProduceNodeConfig, ProducerBatchLimits};
+use barka::produce_node::{ProduceNode, ProduceNodeConfig, ProducerBatchLimits, TopicConfig};
 use barka::producer;
 use barka::s3::{self, S3Config};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
+
+fn parse_topics(s: &str) -> Result<Vec<TopicConfig>, String> {
+    let mut out = Vec::new();
+    for entry in s.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (topic, count) = entry
+            .rsplit_once(':')
+            .ok_or_else(|| format!("invalid topic spec '{entry}', expected TOPIC:NUM_PARTITIONS"))?;
+        let partitions: u32 = count
+            .parse()
+            .map_err(|_| format!("invalid partition count '{count}' in '{entry}'"))?;
+        if partitions == 0 {
+            return Err(format!("partition count must be >= 1 in '{entry}'"));
+        }
+        out.push(TopicConfig {
+            topic: topic.to_string(),
+            partitions,
+        });
+    }
+    if out.is_empty() {
+        return Err("at least one topic must be specified".into());
+    }
+    Ok(out)
+}
 
 #[derive(Parser)]
 #[command(name = "produce-node", version, about = "Barka produce node")]
@@ -42,6 +69,10 @@ struct Cli {
 
     #[arg(long, env = "BARKA_LEADER_ELECTION_POLL_SECS", default_value_t = 3)]
     leader_election_poll_secs: u64,
+
+    /// Topic configuration: TOPIC:NUM_PARTITIONS[,TOPIC:NUM_PARTITIONS,...]
+    #[arg(long, env = "BARKA_TOPICS", default_value = "default:1", value_parser = parse_topics)]
+    topics: Vec<TopicConfig>,
 }
 
 impl Cli {
@@ -70,6 +101,7 @@ impl Cli {
             s3_prefix: self.s3_prefix.clone(),
             producer_limits,
             leader_election_poll_secs: self.leader_election_poll_secs,
+            topics: self.topics.clone(),
         }
     }
 
@@ -96,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         node_id = config.node_id,
         rpc_addr = %config.rpc_addr,
+        topics = ?config.topics,
         s3_endpoint = s3_config.endpoint_url.as_deref().unwrap_or("aws"),
         s3_bucket = %s3_config.bucket,
         "starting produce-node",
