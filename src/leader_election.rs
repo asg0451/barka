@@ -7,11 +7,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::s3::{self, PutOutcome, S3Config};
 
+fn default_addr() -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], 0))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct LockFile {
     valid_until_ms: u64,
     expired: bool,
     node_id: u64,
+    #[serde(default = "default_addr")]
     addr: SocketAddr,
 }
 

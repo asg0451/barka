@@ -70,9 +70,16 @@ impl ProduceRouter {
                 let need_reconnect = self.cached.as_ref().is_none_or(|c| c.addr != leader.addr);
 
                 if need_reconnect {
-                    let client = ProduceClient::connect(leader.addr)
-                        .await
-                        .with_context(|| format!("connect to leader at {}", leader.addr))?;
+                    let client = match ProduceClient::connect(leader.addr).await {
+                        Ok(c) => c,
+                        Err(e) if attempt < MAX_RETRIES => {
+                            tracing::warn!(attempt, error = %e, addr = %leader.addr, "connect failed, retrying");
+                            continue;
+                        }
+                        Err(e) => {
+                            return Err(e).context(format!("connect to leader at {}", leader.addr));
+                        }
+                    };
                     self.cached = Some(CachedLeader {
                         addr: leader.addr,
                         valid_until_ms: leader.valid_until_ms,
