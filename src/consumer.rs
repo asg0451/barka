@@ -62,6 +62,11 @@ struct FetchRequest {
 /// Backpressure limit on outstanding fetch requests to the I/O thread.
 const FETCH_CHANNEL_CAPACITY: usize = 64;
 
+/// Max number of consecutive missing segments to probe past before assuming
+/// the consumer has caught up to the producer. Failed flushes (e.g. leadership
+/// changes) burn a segment sequence number without writing to S3, creating gaps.
+const MAX_SEGMENT_GAP: u64 = 64;
+
 pub struct PartitionConsumer {
     /// Wrapped in `Option` so `Drop` can close the channel before joining the thread.
     request_tx: Option<mpsc::Sender<FetchRequest>>,
@@ -117,8 +122,23 @@ impl PartitionConsumer {
         while result.len() < max {
             let records = self.fetch_segment(seg_seq).await?;
             let Some(records) = records else {
-                debug!(seg_seq, "segment not found — caught up to producer");
-                break;
+                // Probe ahead: failed flushes can skip segment sequence numbers,
+                // creating gaps. Check subsequent segments before giving up.
+                let mut skipped = false;
+                for probe in 1..=MAX_SEGMENT_GAP {
+                    if self.fetch_segment(seg_seq + probe).await?.is_some() {
+                        debug!(seg_seq, gap = probe, "skipping segment gap");
+                        seg_seq += probe;
+                        intra = 0;
+                        skipped = true;
+                        break;
+                    }
+                }
+                if !skipped {
+                    debug!(seg_seq, "no segments found — caught up to producer");
+                    break;
+                }
+                continue;
             };
 
             if intra >= records.len() {
