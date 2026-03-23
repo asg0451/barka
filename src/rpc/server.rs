@@ -107,6 +107,9 @@ impl barka_svc::Server for PerConnectionNode {
         params: barka_svc::ConsumeParams,
         mut results: barka_svc::ConsumeResults,
     ) -> Result<(), capnp::Error> {
+        // Pop the raw message bytes to keep the queue in sync with capnp-rpc's
+        // call sequence — the custom BytesVatNetwork pushes one entry per RPC call,
+        // and each handler must pop its own even if it doesn't need the bytes.
         let _raw = self.msg_bytes.borrow_mut().pop_front();
         let req = params.get()?.get_request()?;
         let resp = results.get().get_response()?;

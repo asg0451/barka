@@ -526,4 +526,58 @@ mod tests {
             "segment 0 should have been evicted and its file deleted"
         );
     }
+
+    #[tokio::test]
+    async fn consume_intra_past_segment_end_snaps_forward() {
+        let (producer, consumer, _) = setup().await;
+        produce_segment(&producer, 3, "seg0").await;
+        produce_segment(&producer, 3, "seg1").await;
+
+        // intra=100 is way past segment 0's 3 records — should skip to segment 1
+        let records = consumer.consume(compose(0, 100), 10).await.unwrap();
+        assert_eq!(records.len(), 3, "should get all of segment 1");
+        assert_eq!(std::str::from_utf8(&records[0].value).unwrap(), "seg1-0");
+        assert_eq!(std::str::from_utf8(&records[1].value).unwrap(), "seg1-1");
+        assert_eq!(std::str::from_utf8(&records[2].value).unwrap(), "seg1-2");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn consume_concurrent_calls() {
+        let (producer, consumer, _) = setup().await;
+        produce_segment(&producer, 3, "seg0").await;
+        produce_segment(&producer, 3, "seg1").await;
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let c = Arc::clone(&consumer);
+            handles.push(tokio::spawn(async move {
+                c.consume(compose(0, 0), 10).await.unwrap()
+            }));
+        }
+
+        for h in handles {
+            let records = h.await.unwrap();
+            assert_eq!(records.len(), 6);
+            assert_eq!(std::str::from_utf8(&records[0].value).unwrap(), "seg0-0");
+            assert_eq!(std::str::from_utf8(&records[5].value).unwrap(), "seg1-2");
+        }
+    }
+
+    #[tokio::test]
+    async fn prefetch_nonexistent_segment_is_harmless() {
+        let (producer, consumer, _) = setup().await;
+        // Only one segment exists; consuming past 75% triggers prefetch of segment 1
+        // which doesn't exist. This must not error.
+        produce_segment(&producer, 3, "val").await;
+
+        let records = consumer.consume(compose(0, 0), 10).await.unwrap();
+        assert_eq!(records.len(), 3);
+
+        // Explicitly prefetch a segment that definitely doesn't exist
+        consumer.prefetch(999);
+
+        // A subsequent normal consume still works fine
+        let records = consumer.consume(compose(0, 0), 10).await.unwrap();
+        assert_eq!(records.len(), 3);
+    }
 }
