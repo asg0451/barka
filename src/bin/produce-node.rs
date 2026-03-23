@@ -31,6 +31,12 @@ fn parse_topics(s: &str) -> Result<Vec<TopicConfig>, String> {
     if out.is_empty() {
         return Err("at least one topic must be specified".into());
     }
+    let mut seen = std::collections::HashSet::new();
+    for tc in &out {
+        if !seen.insert(&tc.topic) {
+            return Err(format!("duplicate topic '{}'", tc.topic));
+        }
+    }
     Ok(out)
 }
 

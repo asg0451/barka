@@ -129,6 +129,9 @@ pub async fn serve_consume_rpc(
         NonZeroUsize::new(MAX_CACHED_CONSUMERS).unwrap(),
     )));
 
+    let s3_config = Rc::new(s3_config);
+    let base_prefix = Rc::new(base_prefix);
+
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
@@ -142,8 +145,8 @@ pub async fn serve_consume_rpc(
                 };
                 info!(%remote, "consume-rpc connection");
                 let consumers = Rc::clone(&consumers);
-                let s3_config = s3_config.clone();
-                let base_prefix = base_prefix.clone();
+                let s3_config = Rc::clone(&s3_config);
+                let base_prefix = Rc::clone(&base_prefix);
 
                 tokio::task::spawn_local(async move {
                     let stream = stream.compat();
@@ -173,8 +176,8 @@ pub async fn serve_consume_rpc(
 
 struct PerConnectionConsumeNode {
     consumers: ConsumerCache,
-    s3_config: S3Config,
-    base_prefix: String,
+    s3_config: Rc<S3Config>,
+    base_prefix: Rc<String>,
 }
 
 impl PerConnectionConsumeNode {
@@ -322,8 +325,8 @@ mod tests {
             consumers: Rc::new(RefCell::new(LruCache::new(
                 NonZeroUsize::new(MAX_CACHED_CONSUMERS).unwrap(),
             ))),
-            s3_config: s3_config.clone(),
-            base_prefix,
+            s3_config: Rc::new(s3_config.clone()),
+            base_prefix: Rc::new(base_prefix),
         }
     }
 
