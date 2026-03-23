@@ -120,25 +120,31 @@ impl PartitionConsumer {
         let mut result = Vec::with_capacity(max.min(1024));
 
         while result.len() < max {
-            let records = self.fetch_segment(seg_seq).await?;
-            let Some(records) = records else {
-                // Probe ahead: failed flushes can skip segment sequence numbers,
-                // creating gaps. Check subsequent segments before giving up.
-                let mut skipped = false;
-                for probe in 1..=MAX_SEGMENT_GAP {
-                    if self.fetch_segment(seg_seq + probe).await?.is_some() {
-                        debug!(seg_seq, gap = probe, "skipping segment gap");
-                        seg_seq += probe;
-                        intra = 0;
-                        skipped = true;
-                        break;
+            let records = match self.fetch_segment(seg_seq).await? {
+                Some(r) => r,
+                None => {
+                    // Probe ahead with exponential steps: failed flushes can skip
+                    // segment sequence numbers, creating gaps.
+                    let mut found = None;
+                    let mut probe = 1u64;
+                    while probe <= MAX_SEGMENT_GAP {
+                        if let Some(r) = self.fetch_segment(seg_seq + probe).await? {
+                            debug!(seg_seq, gap = probe, "skipping segment gap");
+                            seg_seq += probe;
+                            intra = 0;
+                            found = Some(r);
+                            break;
+                        }
+                        probe *= 2;
+                    }
+                    match found {
+                        Some(r) => r,
+                        None => {
+                            debug!(seg_seq, "no segments found — caught up to producer");
+                            break;
+                        }
                     }
                 }
-                if !skipped {
-                    debug!(seg_seq, "no segments found — caught up to producer");
-                    break;
-                }
-                continue;
             };
 
             if intra >= records.len() {
