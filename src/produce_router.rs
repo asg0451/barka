@@ -19,6 +19,7 @@ pub struct ProduceRouter {
 }
 
 struct CachedLeader {
+    namespace: String,
     addr: SocketAddr,
     valid_until_ms: u64,
     client: ProduceClient,
@@ -49,22 +50,25 @@ impl ProduceRouter {
                 self.cached = None;
             }
 
-            if !self.cache_valid() {
-                let leader = leader_election::read_current_leader(
+            if !self.cache_valid_for(&namespace) {
+                let leader = match leader_election::read_current_leader(
                     &self.s3_client,
                     &self.bucket,
                     &namespace,
                     self.leader_election_prefix.as_deref(),
                 )
                 .await
-                .context("read current leader")?;
-
-                let leader = match leader {
-                    Some(l) => l,
-                    None => {
+                {
+                    Ok(Some(l)) => l,
+                    Ok(None) => {
                         tracing::warn!(attempt, %namespace, "no leader found");
                         continue;
                     }
+                    Err(e) if attempt < MAX_RETRIES => {
+                        tracing::warn!(attempt, error = %e, "leader discovery failed, retrying");
+                        continue;
+                    }
+                    Err(e) => return Err(e).context("read current leader"),
                 };
 
                 let need_reconnect = self.cached.as_ref().is_none_or(|c| c.addr != leader.addr);
@@ -81,6 +85,7 @@ impl ProduceRouter {
                         }
                     };
                     self.cached = Some(CachedLeader {
+                        namespace: namespace.clone(),
                         addr: leader.addr,
                         valid_until_ms: leader.valid_until_ms,
                         client,
@@ -112,10 +117,13 @@ impl ProduceRouter {
         anyhow::bail!("produce router: exhausted {MAX_RETRIES} retries");
     }
 
-    fn cache_valid(&self) -> bool {
+    fn cache_valid_for(&self, namespace: &str) -> bool {
         match &self.cached {
             None => false,
             Some(c) => {
+                if c.namespace != namespace {
+                    return false;
+                }
                 let now_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
