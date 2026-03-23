@@ -63,7 +63,7 @@ Two communication layers (same backend; the gateway is a frontend only):
 
 2. **Subagent strategy** — Use subagents liberally to keep the main context clean. Offload research, exploration, and parallel analysis to subagents. For hard problems, use more parallel subagent work. One focused task per subagent.
 
-3. **Self-improvement loop** — After any correction from the user, update `tasks/lessons.md` with the pattern and a rule that prevents repeating the mistake. Iterate on those lessons.
+3. **Self-improvement loop** — When a tool call is rejected, the user says "don't do X", or pushes back on an approach: **stop implementation immediately**, update `tasks/lessons.md` with the pattern, then resume. This is not a post-task activity — it is an interrupt handler. The next tool call after a correction must be an edit to `tasks/lessons.md`.
 
 4. **Verification before done** — Do not mark work complete without evidence it works. When useful, compare behavior against main (or baseline) and your branch. Ask whether a staff engineer would accept the change. Run tests, inspect logs, and show correctness.
 
