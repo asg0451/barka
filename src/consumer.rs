@@ -62,6 +62,11 @@ struct FetchRequest {
 /// Backpressure limit on outstanding fetch requests to the I/O thread.
 const FETCH_CHANNEL_CAPACITY: usize = 64;
 
+/// Max number of consecutive missing segments to probe past before assuming
+/// the consumer has caught up to the producer. Failed flushes (e.g. leadership
+/// changes) burn a segment sequence number without writing to S3, creating gaps.
+const MAX_SEGMENT_GAP: u64 = 64;
+
 pub struct PartitionConsumer {
     /// Wrapped in `Option` so `Drop` can close the channel before joining the thread.
     request_tx: Option<mpsc::Sender<FetchRequest>>,
@@ -115,10 +120,31 @@ impl PartitionConsumer {
         let mut result = Vec::with_capacity(max.min(1024));
 
         while result.len() < max {
-            let records = self.fetch_segment(seg_seq).await?;
-            let Some(records) = records else {
-                debug!(seg_seq, "segment not found — caught up to producer");
-                break;
+            let records = match self.fetch_segment(seg_seq).await? {
+                Some(r) => r,
+                None => {
+                    // Probe ahead with exponential steps: failed flushes can skip
+                    // segment sequence numbers, creating gaps.
+                    let mut found = None;
+                    let mut probe = 1u64;
+                    while probe <= MAX_SEGMENT_GAP {
+                        if let Some(r) = self.fetch_segment(seg_seq + probe).await? {
+                            debug!(seg_seq, gap = probe, "skipping segment gap");
+                            seg_seq += probe;
+                            intra = 0;
+                            found = Some(r);
+                            break;
+                        }
+                        probe *= 2;
+                    }
+                    match found {
+                        Some(r) => r,
+                        None => {
+                            debug!(seg_seq, "no segments found — caught up to producer");
+                            break;
+                        }
+                    }
+                }
             };
 
             if intra >= records.len() {
