@@ -172,11 +172,7 @@ impl FlushRound {
     // NOTE: because this is a lease-based protocol, we may end up writing a
     // segment to S3 that is not of the latest epoch. This is okay.
     #[tracing::instrument(skip(self, s3_client, leadership), fields(key = %self.key, epoch = self.epoch))]
-    async fn do_flush(
-        &self,
-        s3_client: &Client,
-        leadership: &LeadershipState,
-    ) -> Result<()> {
+    async fn do_flush(&self, s3_client: &Client, leadership: &LeadershipState) -> Result<()> {
         if leadership.check_leader() != Some(self.epoch) {
             anyhow::bail!(
                 "leadership lost or epoch changed before flush (expected epoch {})",
@@ -446,9 +442,7 @@ impl PartitionProducer {
         let (is_leader, produced) = round.contribute(&message_bytes, request)?;
 
         if is_leader {
-            let result = round
-                .do_flush(&self.s3_client, &self.leadership)
-                .await;
+            let result = round.do_flush(&self.s3_client, &self.leadership).await;
             let _ = round
                 .done
                 .send(Some(result.as_ref().map(|_| ()).map_err(|e| e.to_string())));

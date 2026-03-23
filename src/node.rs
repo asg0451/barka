@@ -180,12 +180,8 @@ impl Node {
                 .await?
             }
             None => {
-                PartitionProducer::new(
-                    s3_config,
-                    partition_prefix.clone(),
-                    Arc::clone(&leadership),
-                )
-                .await?
+                PartitionProducer::new(s3_config, partition_prefix.clone(), Arc::clone(&leadership))
+                    .await?
             }
         };
 

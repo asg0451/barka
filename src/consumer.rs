@@ -320,8 +320,8 @@ mod tests {
     use crate::node::LeadershipState;
     use crate::producer::PartitionProducer;
     use crate::test_util::TestMessage;
-    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
