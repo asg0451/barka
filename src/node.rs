@@ -315,7 +315,7 @@ async fn run_leader_loop(
         match le.try_become_leader().await {
             Ok(TryBecomeLeaderResult::Leader(info)) => {
                 let epoch = info.epoch.as_u64();
-                if prev_epoch != Some(epoch) && prev_epoch.is_some() {
+                if prev_epoch.is_some_and(|e| e != epoch) {
                     producer.cancel_pending();
                 }
                 state.set_leader(info.valid_until_ms, epoch);

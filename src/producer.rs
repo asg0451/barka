@@ -169,6 +169,8 @@ impl FlushRound {
 
     /// Encode the collected records as a binary segment and upload to S3 via
     /// scatter-gather (zero additional copies).
+    // NOTE: because this is a lease-based protocol, we may end up writing a
+    // segment to S3 that is not of the latest epoch. This is okay.
     #[tracing::instrument(skip(self, s3_client, leadership), fields(key = %self.key, epoch = self.epoch))]
     async fn do_flush(
         &self,
@@ -388,6 +390,11 @@ impl PartitionProducer {
 
         let pending = {
             let mut inner = self.inner.lock().unwrap();
+            assert!(
+                epoch >= inner.epoch,
+                "epoch must not regress: current {}, got {epoch}",
+                inner.epoch
+            );
             inner.epoch = epoch;
             if record_count > inner.max_records {
                 anyhow::bail!(
