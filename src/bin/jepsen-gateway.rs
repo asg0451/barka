@@ -14,11 +14,17 @@ struct Cli {
     )]
     listen_addr: SocketAddr,
 
-    #[arg(long, env = "BARKA_PRODUCE_RPC_ADDR", default_value = "127.0.0.1:9292")]
-    produce_rpc_addr: SocketAddr,
-
     #[arg(long, env = "BARKA_CONSUME_RPC_ADDR", default_value = "127.0.0.1:9392")]
     consume_rpc_addr: SocketAddr,
+
+    #[arg(long, env = "BARKA_S3_ENDPOINT")]
+    s3_endpoint: Option<String>,
+
+    #[arg(long, env = "BARKA_S3_BUCKET", default_value = "barka")]
+    s3_bucket: String,
+
+    #[arg(long, env = "BARKA_AWS_REGION", default_value = "us-east-1")]
+    aws_region: String,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -29,9 +35,14 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    let s3_config = barka::s3::S3Config {
+        endpoint_url: cli.s3_endpoint,
+        bucket: cli.s3_bucket,
+        region: cli.aws_region,
+    };
+
     tracing::info!(
         listen_addr = %cli.listen_addr,
-        produce_rpc_addr = %cli.produce_rpc_addr,
         consume_rpc_addr = %cli.consume_rpc_addr,
         "starting jepsen-gateway",
     );
@@ -41,8 +52,8 @@ fn main() -> anyhow::Result<()> {
         .build()
         .unwrap();
     rt.block_on(barka::jepsen_gateway::serve(
-        cli.produce_rpc_addr,
         cli.consume_rpc_addr,
         cli.listen_addr,
+        s3_config,
     ))
 }

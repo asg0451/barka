@@ -1,5 +1,7 @@
 // based on https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/
 
+use std::net::SocketAddr;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -7,13 +9,10 @@ use crate::s3::{self, PutOutcome, S3Config};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct LockFile {
-    /// The timestamp (ms since epoch) until which the lock is valid, unless manually expired.
     valid_until_ms: u64,
-    /// True if the lock file was manually expired by the node.
     expired: bool,
-    /// The node ID of the leader.
     node_id: u64,
-    // epoch is encoded in the file key
+    addr: SocketAddr,
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Hash)]
@@ -61,6 +60,7 @@ pub struct LeadershipInfo {
 #[derive(Debug, Clone)]
 pub struct LeaderElectionConfig {
     pub node_id: u64,
+    pub addr: SocketAddr,
     pub namespace: String,
     /// Optional path segment before `lock/`; keys are `{prefix}/lock/{namespace}/` when set.
     pub leader_election_prefix: Option<String>,
@@ -70,6 +70,7 @@ pub struct LeaderElectionConfig {
 
 pub struct LeaderElection {
     node_id: u64,
+    addr: SocketAddr,
     s3_client: aws_sdk_s3::Client,
     bucket: String,
     prefix: String,
@@ -107,6 +108,7 @@ impl LeaderElection {
         );
         Self {
             node_id: config.node_id,
+            addr: config.addr,
             s3_client,
             bucket: config.s3_config.bucket.clone(),
             prefix,
@@ -131,7 +133,7 @@ impl LeaderElection {
             let mut last_epoch = None;
             if !contents.is_empty() {
                 let newest = contents.last().unwrap();
-                let key = newest.key().unwrap();
+                let key = newest.key().context("S3 object missing key")?;
                 last_epoch = Some(Epoch::from_key(key)?);
                 let reader =
                     match s3::get_object_reader_if_present(&self.s3_client, &self.bucket, key)
@@ -182,6 +184,7 @@ impl LeaderElection {
                 valid_until_ms,
                 expired: false,
                 node_id: self.node_id,
+                addr: self.addr,
             })
             .unwrap();
 
@@ -239,12 +242,66 @@ impl LeaderElection {
             valid_until_ms: 0,
             expired: true,
             node_id: self.node_id,
+            addr: self.addr,
         })
         .unwrap();
         s3::put_object(&self.s3_client, &self.bucket, &key, body).await?;
         tracing::info!("released leadership");
         Ok(())
     }
+}
+
+#[derive(Debug)]
+pub struct CurrentLeader {
+    pub node_id: u64,
+    pub addr: SocketAddr,
+    pub valid_until_ms: u64,
+    pub epoch: Epoch,
+}
+
+pub async fn read_current_leader(
+    s3_client: &aws_sdk_s3::Client,
+    bucket: &str,
+    namespace: &str,
+    leader_election_prefix: Option<&str>,
+) -> Result<Option<CurrentLeader>> {
+    let prefix = leader_lock_s3_prefix(leader_election_prefix, namespace);
+    let contents = s3::list_objects(s3_client, bucket, &prefix).await?;
+
+    let newest = match contents.last() {
+        Some(obj) => obj,
+        None => return Ok(None),
+    };
+
+    let key = newest.key().context("S3 object missing key")?;
+    let epoch = Epoch::from_key(key)?;
+
+    let reader = match s3::get_object_reader_if_present(s3_client, bucket, key).await? {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    let lock_file: LockFile = serde_json::from_reader(reader).context("deserialize lock file")?;
+
+    if lock_file.expired {
+        return Ok(None);
+    }
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+
+    if lock_file.valid_until_ms <= now_ms {
+        return Ok(None);
+    }
+
+    Ok(Some(CurrentLeader {
+        node_id: lock_file.node_id,
+        addr: lock_file.addr,
+        valid_until_ms: lock_file.valid_until_ms,
+        epoch,
+    }))
 }
 
 #[cfg(test)]
@@ -318,6 +375,7 @@ mod tests {
 
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: "test-ns".into(),
             leader_election_prefix: None,
             s3_config: config.clone(),
@@ -346,6 +404,7 @@ mod tests {
 
         let le1 = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns.clone(),
             leader_election_prefix: None,
             s3_config: config.clone(),
@@ -357,6 +416,7 @@ mod tests {
 
         let le2 = LeaderElection::new(LeaderElectionConfig {
             node_id: 2,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns.clone(),
             leader_election_prefix: None,
             s3_config: config.clone(),
@@ -414,6 +474,7 @@ mod tests {
 
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns,
             leader_election_prefix: None,
             s3_config: config,
@@ -449,12 +510,14 @@ mod tests {
                 valid_until_ms: now_ms() - 60_000,
                 expired: false,
                 node_id: 42,
+                addr: "127.0.0.1:0".parse().unwrap(),
             },
         )
         .await;
 
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 2,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns,
             leader_election_prefix: None,
             s3_config: config,
@@ -487,12 +550,14 @@ mod tests {
                 valid_until_ms: now_ms() + 600_000,
                 expired: true,
                 node_id: 42,
+                addr: "127.0.0.1:0".parse().unwrap(),
             },
         )
         .await;
 
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 3,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns,
             leader_election_prefix: None,
             s3_config: config,
@@ -526,6 +591,7 @@ mod tests {
                     valid_until_ms: now_ms() - 1_000,
                     expired: false,
                     node_id: 99,
+                    addr: "127.0.0.1:0".parse().unwrap(),
                 },
             )
             .await;
@@ -533,6 +599,7 @@ mod tests {
 
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 7,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns,
             leader_election_prefix: None,
             s3_config: config,
@@ -558,6 +625,7 @@ mod tests {
 
         let le1 = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns.clone(),
             leader_election_prefix: None,
             s3_config: config.clone(),
@@ -581,6 +649,7 @@ mod tests {
         // Another node should be able to take over immediately
         let le2 = LeaderElection::new(LeaderElectionConfig {
             node_id: 2,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns,
             leader_election_prefix: None,
             s3_config: config,
@@ -614,6 +683,7 @@ mod tests {
                     valid_until_ms: now_ms() - 60_000,
                     expired: false,
                     node_id: 99,
+                    addr: "127.0.0.1:0".parse().unwrap(),
                 },
             )
             .await;
@@ -625,6 +695,7 @@ mod tests {
 
         let le = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns,
             leader_election_prefix: None,
             s3_config: config,
@@ -676,6 +747,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let le = LeaderElection::new(LeaderElectionConfig {
                     node_id: i as u64,
+                    addr: "127.0.0.1:0".parse().unwrap(),
                     namespace: ns,
                     leader_election_prefix: None,
                     s3_config: config,
@@ -707,6 +779,7 @@ mod tests {
 
         let le_a = LeaderElection::new(LeaderElectionConfig {
             node_id: 1,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns.into(),
             leader_election_prefix: Some("cluster-a".into()),
             s3_config: config.clone(),
@@ -715,6 +788,7 @@ mod tests {
         .await;
         let le_b = LeaderElection::new(LeaderElectionConfig {
             node_id: 2,
+            addr: "127.0.0.1:0".parse().unwrap(),
             namespace: ns.into(),
             leader_election_prefix: Some("cluster-b".into()),
             s3_config: config,
@@ -752,6 +826,7 @@ mod tests {
                 valid_until_ms: now_ms() - 60_000,
                 expired: false,
                 node_id: 99,
+                addr: "127.0.0.1:0".parse().unwrap(),
             },
         )
         .await;
@@ -767,6 +842,7 @@ mod tests {
             handles.push(tokio::spawn(async move {
                 let le = LeaderElection::new(LeaderElectionConfig {
                     node_id: i as u64,
+                    addr: "127.0.0.1:0".parse().unwrap(),
                     namespace: ns,
                     leader_election_prefix: None,
                     s3_config: config,
@@ -793,6 +869,66 @@ mod tests {
             leader_epochs[0],
             Epoch(4),
             "new epoch should be one past the expired lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_read_current_leader() {
+        require_localstack().await;
+        let bucket = unique_name("test-leader");
+        let ns = unique_name("ns");
+        let config = localstack_config(&bucket);
+        let client = s3::build_client(&config).await;
+        s3::ensure_bucket(&client, &bucket).await.unwrap();
+
+        let result = super::read_current_leader(&client, &bucket, &ns, None)
+            .await
+            .unwrap();
+        assert!(result.is_none(), "should be None when no lock files exist");
+
+        let addr: SocketAddr = "127.0.0.1:9292".parse().unwrap();
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(1),
+            &LockFile {
+                valid_until_ms: now_ms() + 60_000,
+                expired: false,
+                node_id: 1,
+                addr,
+            },
+        )
+        .await;
+
+        let leader = super::read_current_leader(&client, &bucket, &ns, None)
+            .await
+            .unwrap()
+            .expect("should find leader");
+        assert_eq!(leader.node_id, 1);
+        assert_eq!(leader.addr, addr);
+        assert_eq!(leader.epoch, Epoch(1));
+
+        write_lock_file_direct(
+            &client,
+            &bucket,
+            &ns,
+            Epoch(2),
+            &LockFile {
+                valid_until_ms: now_ms() - 1_000,
+                expired: false,
+                node_id: 2,
+                addr: "127.0.0.1:9393".parse().unwrap(),
+            },
+        )
+        .await;
+
+        let result = super::read_current_leader(&client, &bucket, &ns, None)
+            .await
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "should be None when lock is expired by time"
         );
     }
 }

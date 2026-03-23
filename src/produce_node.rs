@@ -210,6 +210,7 @@ impl ProduceNode {
                 };
                 let cfg = LeaderElectionConfig {
                     node_id: self.config.node_id,
+                    addr: self.config.rpc_addr,
                     namespace,
                     leader_election_prefix: self.config.leader_election_prefix.clone(),
                     s3_config: self.s3_config.clone(),

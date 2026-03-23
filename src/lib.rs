@@ -9,6 +9,7 @@ pub mod log;
 pub mod log_offset;
 pub mod node;
 pub mod produce_node;
+pub mod produce_router;
 pub mod producer;
 pub mod rpc;
 pub mod s3;
