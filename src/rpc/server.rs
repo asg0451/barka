@@ -29,6 +29,7 @@ pub async fn serve_produce_rpc(
     partitions: PartitionMap,
     addr: SocketAddr,
     abdication_cooldown: std::time::Duration,
+    node_id: u64,
     s3_config: S3Config,
     leader_election_prefix: Option<String>,
 ) -> anyhow::Result<()> {
@@ -73,6 +74,7 @@ pub async fn serve_produce_rpc(
                         partitions,
                         msg_bytes: call_bytes_queue,
                         abdication_cooldown,
+                        node_id,
                         s3_client,
                         bucket,
                         le_prefix,
@@ -93,6 +95,7 @@ struct PerConnectionProduceNode {
     partitions: PartitionMap,
     msg_bytes: MessageBytesQueue,
     abdication_cooldown: std::time::Duration,
+    node_id: u64,
     s3_client: Rc<aws_sdk_s3::Client>,
     bucket: Rc<String>,
     le_prefix: Rc<Option<String>>,
@@ -163,7 +166,8 @@ impl produce_svc::Server for PerConnectionProduceNode {
                 // Set cooldown before clearing leadership so the leader loop
                 // cannot re-acquire between the two calls.
                 state.leadership.set_cooldown(self.abdication_cooldown);
-                if let Some(epoch) = state.leadership.set_not_leader() {
+                let was_leader = state.leadership.set_not_leader();
+                if let Some(epoch) = was_leader {
                     tracing::info!(
                         %topic, partition, epoch,
                         cooldown_secs = self.abdication_cooldown.as_secs(),
@@ -172,20 +176,23 @@ impl produce_svc::Server for PerConnectionProduceNode {
                 }
                 state.producer.cancel_pending();
 
-                // Expire the S3 lock so other nodes can claim the partition immediately.
-                let namespace = leader_namespace(&topic, partition);
-                if let Err(e) = leader_election::force_abdicate(
-                    &self.s3_client,
-                    &self.bucket,
-                    &namespace,
-                    self.le_prefix.as_deref(),
-                )
-                .await
-                {
-                    tracing::warn!(
-                        %topic, partition, error = %e,
-                        "failed to expire S3 lock (other nodes must wait for TTL)"
-                    );
+                // Only expire the S3 lock if we were actually the leader.
+                if was_leader.is_some() {
+                    let namespace = leader_namespace(&topic, partition);
+                    if let Err(e) = leader_election::force_abdicate(
+                        &self.s3_client,
+                        &self.bucket,
+                        &namespace,
+                        self.le_prefix.as_deref(),
+                        self.node_id,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            %topic, partition, error = %e,
+                            "failed to expire S3 lock (other nodes must wait for TTL)"
+                        );
+                    }
                 }
                 true
             }
@@ -481,6 +488,7 @@ mod tests {
                             partitions: pm,
                             msg_bytes: call_bytes_queue,
                             abdication_cooldown: std::time::Duration::from_secs(60),
+                            node_id: 0,
                             s3_client: s3c,
                             bucket: bkt,
                             le_prefix: lep,
@@ -653,6 +661,7 @@ mod tests {
                             partitions: pm,
                             msg_bytes: call_bytes_queue,
                             abdication_cooldown: std::time::Duration::from_secs(60),
+                            node_id: 0,
                             s3_client: s3c,
                             bucket: bkt,
                             le_prefix: lep,
@@ -770,6 +779,7 @@ mod tests {
                                         partitions: Arc::clone(&pm),
                                         msg_bytes: call_bytes_queue,
                                         abdication_cooldown: std::time::Duration::from_secs(60),
+                                        node_id: 0,
                                         s3_client: Rc::clone(&s3c),
                                         bucket: Rc::clone(&bkt),
                                         le_prefix: Rc::clone(&lep),
@@ -899,6 +909,7 @@ mod tests {
                             partitions: pm,
                             msg_bytes: call_bytes_queue,
                             abdication_cooldown: std::time::Duration::from_secs(60),
+                            node_id: 0,
                             s3_client: s3c,
                             bucket: bkt,
                             le_prefix: lep,

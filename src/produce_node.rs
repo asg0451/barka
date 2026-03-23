@@ -223,6 +223,7 @@ impl ProduceNode {
         let partitions = Arc::clone(&self.partitions);
 
         let abdication_cooldown = Duration::from_secs(self.config.abdication_cooldown_secs);
+        let node_id = self.config.node_id;
         let s3_config = self.s3_config.clone();
         let le_prefix = self.config.leader_election_prefix.clone();
         let rpc_handle = std::thread::spawn(move || {
@@ -234,6 +235,7 @@ impl ProduceNode {
                 partitions,
                 rpc_addr,
                 abdication_cooldown,
+                node_id,
                 s3_config,
                 le_prefix,
             ))
