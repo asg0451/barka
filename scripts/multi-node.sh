@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Starts multiple barka produce-nodes (competing for leadership) and one consume-node.
+# Starts multiple barka produce-nodes (competing for leadership), one consume-node,
+# and one rebalancer.
 # Usage: ./scripts/multi-node.sh [NUM_NODES]  (default: 3)
 # Requires: LocalStack running on :4566.
 
@@ -26,7 +27,7 @@ cleanup() {
 }
 trap cleanup INT TERM
 
-echo "starting $NUM_NODES produce-nodes + 1 consume-node (s3-prefix=$S3_PREFIX)"
+echo "starting $NUM_NODES produce-nodes + 1 consume-node + 1 rebalancer (s3-prefix=$S3_PREFIX)"
 echo ""
 
 for i in $(seq 0 $((NUM_NODES - 1))); do
@@ -51,6 +52,15 @@ RUST_LOG=barka=info RUST_BACKTRACE=1 \
     --s3-endpoint "$S3_ENDPOINT" \
     --s3-prefix "$S3_PREFIX" \
     2>&1 | sed "s/^/[consume] /" &
+
+echo "rebalancer: interval=30s"
+
+RUST_LOG=barka=info RUST_BACKTRACE=1 \
+    ./target/debug/rebalancer \
+    --s3-endpoint "$S3_ENDPOINT" \
+    --leader-election-prefix "$S3_PREFIX" \
+    --interval-secs 30 \
+    2>&1 | sed "s/^/[rebalancer] /" &
 
 echo ""
 echo "all nodes started. press ctrl-c to stop."

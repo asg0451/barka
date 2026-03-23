@@ -6,3 +6,4 @@
 - [X] add support for on the fly topic/partition creation
 - [X] make a more sophisticated client which can examing topic-partition leadership state to route produce requests to the appropriate node, taking expiry and retries into account.
 - [ ] add a service that examines topic-partition leadership state and forces rebalances if the load is uneven
+- [ ] on partition deletion, delete its data
