@@ -450,10 +450,19 @@ async fn run_registry_poller(
             }
         }
 
-        // Reap crashed LE loops so failures aren't silently lost.
+        // Reap crashed LE loops — remove from both handle map and partition
+        // map so the next poll cycle re-creates the partition cleanly.
         le_handles.retain(|key, handle| {
             if handle.is_finished() {
-                tracing::error!(topic = %key.0, partition = key.1, "leader election loop exited unexpectedly");
+                tracing::error!(topic = %key.0, partition = key.1, "leader election loop exited unexpectedly, removing partition for re-creation");
+                let state = {
+                    let mut map = cfg.partitions.write().unwrap();
+                    map.remove(key)
+                };
+                if let Some(state) = state {
+                    state.leadership.set_not_leader();
+                    state.producer.cancel_pending();
+                }
                 false
             } else {
                 true
