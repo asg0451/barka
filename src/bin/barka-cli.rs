@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use std::io::{self, BufRead, IsTerminal};
 use std::net::SocketAddr;
 
