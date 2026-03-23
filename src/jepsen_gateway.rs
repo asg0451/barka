@@ -1,5 +1,6 @@
-//! Jepsen API gateway: newline-delimited JSON over TCP, routing produce ops to
-//! a produce-node and consume ops to a consume-node via Cap'n Proto RPC.
+//! Jepsen API gateway: newline-delimited JSON over TCP, routing produce ops
+//! through S3-based leader discovery and consume ops to a consume-node via
+//! Cap'n Proto RPC.
 //!
 //! Runs on a dedicated `current_thread` Tokio runtime with a top-level [`LocalSet`]
 //! (same constraints as the Cap'n Proto RPC stack: `!Send` futures, `spawn_local`).
@@ -12,12 +13,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
-use crate::rpc::client::{ConsumeClient, ProduceClient};
+use crate::produce_router::ProduceRouter;
+use crate::rpc::client::ConsumeClient;
+use crate::s3::S3Config;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-
-const PRODUCE_MAX_RETRIES: u32 = 5;
-const PRODUCE_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// Newline-delimited JSON gateway.
 ///
@@ -27,9 +27,9 @@ const PRODUCE_RETRY_DELAY: Duration = Duration::from_millis(200);
 ///           `{"ok":true,"values":["hello"]}`
 ///           `{"ok":false,"error":"..."}`
 pub async fn serve(
-    produce_rpc_addr: SocketAddr,
     consume_rpc_addr: SocketAddr,
     listen_addr: SocketAddr,
+    s3_config: S3Config,
 ) -> anyhow::Result<()> {
     let local = tokio::task::LocalSet::new();
     local
@@ -37,7 +37,6 @@ pub async fn serve(
             let listener = TcpListener::bind(listen_addr).await?;
             info!(
                 %listen_addr,
-                %produce_rpc_addr,
                 %consume_rpc_addr,
                 "jepsen gateway listening",
             );
@@ -46,8 +45,9 @@ pub async fn serve(
                 let (stream, remote) = listener.accept().await?;
                 info!(%remote, "jepsen gateway connection");
 
+                let s3_config = s3_config.clone();
                 tokio::task::spawn_local(async move {
-                    if let Err(e) = run_session(stream, produce_rpc_addr, consume_rpc_addr).await {
+                    if let Err(e) = run_session(stream, consume_rpc_addr, s3_config).await {
                         error!(%e, "jepsen gateway session ended with error");
                     }
                 });
@@ -58,16 +58,16 @@ pub async fn serve(
 
 async fn run_session(
     stream: tokio::net::TcpStream,
-    produce_rpc_addr: SocketAddr,
     consume_rpc_addr: SocketAddr,
+    s3_config: S3Config,
 ) -> anyhow::Result<()> {
-    let produce_client = connect_produce_with_retry(produce_rpc_addr).await?;
+    let mut produce = ProduceRouter::new(&s3_config, None).await;
     let mut consume_client = connect_consume_with_retry(consume_rpc_addr).await?;
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        let response = handle_json_line(&produce_client, &mut consume_client, &line).await;
+        let response = handle_json_line(&mut produce, &mut consume_client, &line).await;
         let mut out = serde_json::to_string(&response).unwrap();
         out.push('\n');
         if writer.write_all(out.as_bytes()).await.is_err() {
@@ -75,28 +75,6 @@ async fn run_session(
         }
     }
     Ok(())
-}
-
-async fn connect_produce_with_retry(addr: SocketAddr) -> anyhow::Result<ProduceClient> {
-    const MAX_ATTEMPTS: u32 = 100;
-    const DELAY: Duration = Duration::from_millis(25);
-
-    let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 0..MAX_ATTEMPTS {
-        match ProduceClient::connect(addr).await {
-            Ok(c) => {
-                if attempt > 0 {
-                    info!(%addr, attempt, "jepsen gateway: connected to produce rpc");
-                }
-                return Ok(c);
-            }
-            Err(e) => {
-                last_err = Some(e);
-                tokio::time::sleep(DELAY).await;
-            }
-        }
-    }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("produce connect failed")))
 }
 
 async fn connect_consume_with_retry(addr: SocketAddr) -> anyhow::Result<ConsumeClient> {
@@ -157,15 +135,8 @@ struct JsonlResponse {
     error: Option<String>,
 }
 
-fn is_transient_produce_error(msg: &str) -> bool {
-    msg.contains("not leader")
-        || msg.contains("leadership lost")
-        || msg.contains("batch cancelled")
-        || msg.contains("epoch changed")
-}
-
 async fn handle_json_line(
-    produce_client: &ProduceClient,
+    produce: &mut ProduceRouter,
     consume_client: &mut ConsumeClient,
     line: &str,
 ) -> JsonlResponse {
@@ -185,69 +156,41 @@ async fn handle_json_line(
     match req.op.as_str() {
         "produce" => {
             let value = req.value.unwrap_or_default().into_bytes();
-            let mut last_err = String::new();
-            for attempt in 0..=PRODUCE_MAX_RETRIES {
-                if attempt > 0 {
-                    tokio::time::sleep(PRODUCE_RETRY_DELAY).await;
-                }
-                match tokio::time::timeout(
-                    REQUEST_TIMEOUT,
-                    produce_client.produce(&req.topic, req.partition, vec![value.clone()]),
-                )
-                .await
-                {
-                    Ok(Ok(records)) => {
-                        return JsonlResponse {
-                            ok: true,
-                            offset: records.first().map(|r| r.offset),
-                            next_offset: None,
-                            values: None,
-                            error: None,
-                        };
-                    }
-                    Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        if is_transient_produce_error(&msg) && attempt < PRODUCE_MAX_RETRIES {
-                            warn!(
-                                topic = %req.topic,
-                                attempt,
-                                error = %msg,
-                                "jepsen gateway produce retrying",
-                            );
-                            last_err = msg;
-                            continue;
-                        }
-                        return JsonlResponse {
-                            ok: false,
-                            offset: None,
-                            next_offset: None,
-                            values: None,
-                            error: Some(msg),
-                        };
-                    }
-                    Err(_elapsed) => {
-                        warn!(
-                            topic = %req.topic,
-                            partition = req.partition,
-                            ?REQUEST_TIMEOUT,
-                            "jepsen gateway produce timed out"
-                        );
-                        return JsonlResponse {
-                            ok: false,
-                            offset: None,
-                            next_offset: None,
-                            values: None,
-                            error: Some(format!("request timed out after {:?}", REQUEST_TIMEOUT)),
-                        };
+            match tokio::time::timeout(
+                REQUEST_TIMEOUT,
+                produce.produce(&req.topic, req.partition, vec![value]),
+            )
+            .await
+            {
+                Ok(Ok(records)) => JsonlResponse {
+                    ok: true,
+                    offset: records.first().map(|r| r.offset),
+                    next_offset: None,
+                    values: None,
+                    error: None,
+                },
+                Ok(Err(e)) => JsonlResponse {
+                    ok: false,
+                    offset: None,
+                    next_offset: None,
+                    values: None,
+                    error: Some(e.to_string()),
+                },
+                Err(_elapsed) => {
+                    warn!(
+                        topic = %req.topic,
+                        partition = req.partition,
+                        ?REQUEST_TIMEOUT,
+                        "jepsen gateway produce timed out"
+                    );
+                    JsonlResponse {
+                        ok: false,
+                        offset: None,
+                        next_offset: None,
+                        values: None,
+                        error: Some(format!("request timed out after {:?}", REQUEST_TIMEOUT)),
                     }
                 }
-            }
-            JsonlResponse {
-                ok: false,
-                offset: None,
-                next_offset: None,
-                values: None,
-                error: Some(format!("produce failed after retries: {last_err}")),
             }
         }
         "consume" => {

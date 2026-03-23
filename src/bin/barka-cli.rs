@@ -1,9 +1,11 @@
+#![recursion_limit = "256"]
+
 use std::io::{self, BufRead, IsTerminal};
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result, bail};
 use barka::log_offset::format_decomposed;
-use barka::rpc::client::{ConsumeClient, ProduceClient};
+use barka::rpc::client::ConsumeClient;
 use clap::Parser;
 
 #[derive(Parser)]
@@ -14,9 +16,6 @@ use clap::Parser;
 )]
 #[group(id = "mode", required = true, args = ["produce", "consume"])]
 struct Cli {
-    #[arg(long, default_value = "127.0.0.1:9292")]
-    produce_addr: SocketAddr,
-
     #[arg(long, default_value = "127.0.0.1:9392")]
     consume_addr: SocketAddr,
 
@@ -45,6 +44,18 @@ struct Cli {
     /// Print consume output as JSON Lines (default: pretty text).
     #[arg(long)]
     json: bool,
+
+    /// S3 endpoint URL for leader discovery (e.g. http://localhost:4566).
+    #[arg(long)]
+    s3_endpoint: Option<String>,
+
+    /// S3 bucket for leader discovery.
+    #[arg(long, default_value = "barka")]
+    s3_bucket: String,
+
+    /// AWS region for S3.
+    #[arg(long, default_value = "us-east-1")]
+    aws_region: String,
 }
 
 fn collect_produce_values(cli: &Cli) -> Result<Vec<Vec<u8>>> {
@@ -84,14 +95,18 @@ fn main() -> Result<()> {
         local
             .run_until(async {
                 if cli.produce {
-                    let client = ProduceClient::connect(cli.produce_addr)
-                        .await
-                        .with_context(|| format!("connect {}", cli.produce_addr))?;
                     let values = collect_produce_values(&cli)?;
-                    let records = client
+                    let s3_config = barka::s3::S3Config {
+                        endpoint_url: cli.s3_endpoint.clone(),
+                        bucket: cli.s3_bucket.clone(),
+                        region: cli.aws_region.clone(),
+                    };
+                    let mut router =
+                        barka::produce_router::ProduceRouter::new(&s3_config, None).await;
+                    let records = router
                         .produce(&cli.topic, cli.partition, values)
                         .await
-                        .context("produce RPC")?;
+                        .context("produce")?;
                     if cli.json {
                         for rec in &records {
                             println!(
