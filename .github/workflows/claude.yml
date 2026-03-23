@@ -25,16 +25,55 @@ jobs:
       id-token: write
       actions: read
     steps:
+      - name: Ensure Anthropic credentials
+        env:
+          HAS_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+          HAS_OAUTH: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          if [ "$HAS_API_KEY" != "true" ] && [ "$HAS_OAUTH" != "true" ]; then
+            echo '::error::Claude Code needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN. Add one under Settings → Secrets and variables → Actions (repository or organization).'
+            exit 1
+          fi
+
+      - name: Resolve PR head for checkout
+        id: pr_head
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const payload = context.payload;
+            let ref = "";
+
+            if (payload.pull_request) {
+              ref = payload.pull_request.head.sha;
+            } else if (payload.issue?.pull_request) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: payload.issue.number,
+              });
+              ref = pr.head.sha;
+            }
+
+            core.setOutput("ref", ref);
+            if (ref) {
+              core.info(`Checking out PR head at ${ref}`);
+            } else {
+              core.info("No PR in this event; checkout uses the default ref for the workflow");
+            }
+
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 1
+          ref: ${{ steps.pr_head.outputs.ref || github.sha }}
 
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
+          github_token: ${{ github.token }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             REPO OWNER: ${{ github.repository_owner }}
             REPO NAME: ${{ github.event.repository.name }}
@@ -97,7 +136,7 @@ jobs:
             - Security implications
             - Performance considerations
 
-            Note: The PR branch is already checked out in the current working directory.
+            Note: For pull requests, the PR head commit is checked out in the working directory.
 
             Use `gh pr comment` for top-level feedback.
             Use `mcp__github_inline_comment__create_inline_comment` to highlight specific code issues.
