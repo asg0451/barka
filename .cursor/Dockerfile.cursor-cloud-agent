@@ -63,6 +63,7 @@ RUN echo "ubuntu:ubuntu" | chpasswd
 USER ubuntu
 WORKDIR /home/ubuntu
 RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly --profile minimal \
+    && . "$HOME/.cargo/env" \
     && rustup component add clippy
 
 ENV PATH="/home/ubuntu/.cargo/bin:${PATH}"
