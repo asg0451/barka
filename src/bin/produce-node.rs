@@ -7,7 +7,10 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-fn parse_topics(s: &str) -> Result<Vec<TopicConfig>, String> {
+#[derive(Clone, Debug)]
+struct TopicConfigs(Vec<TopicConfig>);
+
+fn parse_topics(s: &str) -> Result<TopicConfigs, String> {
     let mut out = Vec::new();
     for entry in s.split(',') {
         let entry = entry.trim();
@@ -37,7 +40,7 @@ fn parse_topics(s: &str) -> Result<Vec<TopicConfig>, String> {
             return Err(format!("duplicate topic '{}'", tc.topic));
         }
     }
-    Ok(out)
+    Ok(TopicConfigs(out))
 }
 
 #[derive(Parser)]
@@ -82,7 +85,7 @@ struct Cli {
 
     /// Topic configuration: TOPIC:NUM_PARTITIONS[,TOPIC:NUM_PARTITIONS,...]
     #[arg(long, env = "BARKA_TOPICS", default_value = "default:1", value_parser = parse_topics)]
-    topics: Vec<TopicConfig>,
+    topics: TopicConfigs,
 }
 
 impl Cli {
@@ -112,7 +115,7 @@ impl Cli {
             producer_limits,
             leader_election_poll_secs: self.leader_election_poll_secs,
             leader_election_prefix: self.leader_election_prefix.clone(),
-            topics: self.topics.clone(),
+            topics: self.topics.0.clone(),
         }
     }
 
