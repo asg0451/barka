@@ -4,6 +4,7 @@
 //! tokio runtime, keeping the `!Send` capnp-rpc `LocalSet` non-blocking.
 //! The RPC handler communicates with the I/O thread via channels.
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -55,8 +56,12 @@ struct FetchRequest {
 // PartitionConsumer (public handle)
 // ---------------------------------------------------------------------------
 
+/// Backpressure limit on outstanding fetch requests to the I/O thread.
+const FETCH_CHANNEL_CAPACITY: usize = 64;
+
 pub struct PartitionConsumer {
-    request_tx: mpsc::UnboundedSender<FetchRequest>,
+    request_tx: mpsc::Sender<FetchRequest>,
+    prefetched: std::sync::Mutex<HashSet<u64>>,
     _io_thread: std::thread::JoinHandle<()>,
 }
 
@@ -70,7 +75,7 @@ impl PartitionConsumer {
         std::fs::create_dir_all(&config.cache_dir)?;
 
         let s3_config = s3_config.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(FETCH_CHANNEL_CAPACITY);
 
         let io_thread = std::thread::Builder::new()
             .name(format!("consumer-io-{prefix}"))
@@ -91,6 +96,7 @@ impl PartitionConsumer {
         info!(%prefix, "partition consumer started");
         Ok(Arc::new(Self {
             request_tx: tx,
+            prefetched: std::sync::Mutex::new(HashSet::new()),
             _io_thread: io_thread,
         }))
     }
@@ -154,15 +160,23 @@ impl PartitionConsumer {
                 segment_seq: seg_seq,
                 reply: tx,
             })
+            .await
             .map_err(|_| anyhow::anyhow!("consumer I/O thread gone"))?;
         rx.await
             .map_err(|_| anyhow::anyhow!("consumer I/O thread dropped reply"))?
     }
 
     /// Fire-and-forget prefetch: send the request but drop the reply channel.
+    /// Skips segments that have already been prefetched.
     fn prefetch(&self, seg_seq: u64) {
+        {
+            let mut set = self.prefetched.lock().unwrap();
+            if !set.insert(seg_seq) {
+                return;
+            }
+        }
         let (tx, _rx) = oneshot::channel();
-        let _ = self.request_tx.send(FetchRequest {
+        let _ = self.request_tx.try_send(FetchRequest {
             segment_seq: seg_seq,
             reply: tx,
         });
@@ -227,13 +241,10 @@ impl IoState {
         let key = format!("{}/{:020}.dat", self.prefix, seg_seq);
         debug!(seg_seq, %key, "S3 fetch");
 
-        let reader = s3::get_object_reader_if_present(&self.s3_client, &self.bucket, &key).await?;
-        let Some(mut reader) = reader else {
+        let buf = s3::get_object_bytes_if_present(&self.s3_client, &self.bucket, &key).await?;
+        let Some(buf) = buf else {
             return Ok(None);
         };
-
-        let mut buf = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut buf)?;
         let raw_len = buf.len();
 
         let (_epoch, records) = segment::decode(&buf)?;
@@ -265,7 +276,7 @@ async fn io_loop(
     s3_config: S3Config,
     prefix: String,
     config: ConsumerConfig,
-    mut rx: mpsc::UnboundedReceiver<FetchRequest>,
+    mut rx: mpsc::Receiver<FetchRequest>,
 ) {
     let s3_client = s3::build_client(&s3_config).await;
     let bucket = s3_config.bucket.clone();
@@ -292,8 +303,7 @@ mod tests {
     use super::*;
     use crate::log_offset::compose;
     use crate::producer::PartitionProducer;
-    use crate::rpc::barka_capnp::produce_request;
-    use bytes::Bytes;
+    use crate::test_util::TestMessage;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -330,45 +340,6 @@ mod tests {
                     .as_nanos(),
                 TEST_COUNTER.fetch_add(1, Ordering::Relaxed),
             )),
-        }
-    }
-
-    struct TestMessage {
-        bytes: Bytes,
-        reader: capnp::message::Reader<capnp::serialize::BufferSegments<Bytes>>,
-    }
-
-    impl TestMessage {
-        fn new(n_records: usize, value_prefix: &str) -> Self {
-            let mut builder = capnp::message::Builder::new_default();
-            {
-                let mut req = builder.init_root::<produce_request::Builder>();
-                req.set_topic("test");
-                req.set_partition(0);
-                let mut records = req.init_records(n_records as u32);
-                for i in 0..n_records {
-                    let mut r = records.reborrow().get(i as u32);
-                    r.set_key(format!("k{i}").as_bytes());
-                    r.set_value(format!("{value_prefix}-{i}").as_bytes());
-                    r.set_timestamp(i as i64);
-                }
-            }
-            let words = capnp::serialize::write_message_to_words(&builder);
-            let bytes = Bytes::from(words);
-            let segments =
-                capnp::serialize::BufferSegments::new(bytes.clone(), Default::default()).unwrap();
-            let reader = capnp::message::Reader::new(segments, Default::default());
-            Self { bytes, reader }
-        }
-
-        fn bytes(&self) -> &Bytes {
-            &self.bytes
-        }
-
-        fn request(&self) -> produce_request::Reader<'_> {
-            self.reader
-                .get_root::<produce_request::Reader<'_>>()
-                .unwrap()
         }
     }
 
@@ -500,10 +471,11 @@ mod tests {
         .unwrap();
 
         let mut config = test_consumer_config();
-        // Force everything to disk tier by setting threshold to 0
+        // Force everything to disk tier by setting threshold to 0.
+        // disk_cache=2 means segment 0's file gets evicted when segment 2 arrives.
         config.disk_threshold_bytes = 0;
         config.disk_cache_max_segments = 2;
-        config.mem_cache_max_segments = 1; // minimal memory tier
+        config.mem_cache_max_segments = 1;
 
         let consumer = PartitionConsumer::new(&s3_config, prefix.clone(), config.clone())
             .await
@@ -514,31 +486,29 @@ mod tests {
         produce_segment(&producer, 3, "s1").await;
         produce_segment(&producer, 3, "s2").await;
 
-        // Consume all 3 segments to populate disk cache
+        // Consume each segment individually so they each go through handle_fetch
         consumer.consume(compose(0, 0), 3).await.unwrap();
         consumer.consume(compose(1, 0), 3).await.unwrap();
         consumer.consume(compose(2, 0), 3).await.unwrap();
 
-        // Give I/O thread time to process
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        // Disk cache has capacity 2, so segment 0's file should have been evicted
         let seg0_path = config.cache_dir.join(format!("{:020}.dat", 0));
-        // File may or may not exist depending on whether it went to disk tier
-        // (since memory tier also stores it). The key invariant: disk cache
-        // cleans up evicted files.
+        let seg1_path = config.cache_dir.join(format!("{:020}.dat", 1));
         let seg2_path = config.cache_dir.join(format!("{:020}.dat", 2));
-        // Most recent segment should still be on disk if it went to disk tier
-        if seg2_path.exists() {
-            assert!(
-                seg2_path.exists(),
-                "most recent segment should be cached on disk"
-            );
-        }
-        // Verify the evicted file was cleaned up if it ever existed
-        if seg0_path.exists() {
-            // This could happen if both tiers have capacity, which is fine.
-            // The test mainly verifies we don't panic or leak.
-        }
+
+        // Segments 1 and 2 should still be on disk (disk cache capacity = 2)
+        assert!(
+            seg1_path.exists(),
+            "segment 1 should still be cached on disk"
+        );
+        assert!(
+            seg2_path.exists(),
+            "segment 2 should still be cached on disk"
+        );
+
+        // Segment 0 was evicted from disk cache when segment 2 was inserted
+        assert!(
+            !seg0_path.exists(),
+            "segment 0 should have been evicted and its file deleted"
+        );
     }
 }

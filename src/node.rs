@@ -200,6 +200,9 @@ impl Node {
         request: consume_request::Reader<'_>,
         response: consume_response::Builder<'_>,
     ) -> capnp::Result<()> {
+        // TODO: only one topic/partition supported right now — the single
+        // partition prefix the node was initialized with. Validate or route
+        // once multi-partition support lands.
         let _topic = request.get_topic()?.to_string()?;
         let _partition = request.get_partition();
         let offset = request.get_offset();

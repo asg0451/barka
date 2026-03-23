@@ -11,3 +11,5 @@ pub mod producer;
 pub mod rpc;
 pub mod s3;
 pub mod segment;
+#[cfg(test)]
+pub mod test_util;
