@@ -52,6 +52,17 @@
       (:offset resp)
       (throw (ex-info "produce failed" resp)))))
 
+(defn produce-batch!
+  "Sends a batch produce request. Returns a vector of offsets."
+  [conn topic partition values]
+  (let [resp (request! conn {:op "produce"
+                             :topic topic
+                             :partition partition
+                             :values (mapv str values)})]
+    (if (:ok resp)
+      (:offsets resp)
+      (throw (ex-info "produce-batch failed" resp)))))
+
 (defn consume!
   "Sends a consume request. Returns {:values [str ...] :next-offset n}."
   [conn topic partition offset max-records]
