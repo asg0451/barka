@@ -42,6 +42,10 @@ impl Default for S3Config {
 /// the request body with SHA-256. Without this, every S3 PUT computes SHA-256
 /// over the entire segment body before uploading — the dominant CPU cost under
 /// load (~74% of produce-node CPU time with 100k-record segments).
+///
+/// Combined with `RequestChecksumCalculation::WhenRequired` on the client, this
+/// means no client-side integrity check on upload bodies. HTTPS provides
+/// transport-level integrity, and S3 computes its own ETag on receipt.
 #[derive(Debug)]
 struct UnsignedPayloadInterceptor;
 
@@ -56,6 +60,8 @@ impl Intercept for UnsignedPayloadInterceptor {
         _runtime_components: &RuntimeComponents,
         cfg: &mut ConfigBag,
     ) -> std::result::Result<(), BoxError> {
+        // TODO: replace with builder-level config when the SDK adds a
+        // first-class `payload_signing` option on the S3 client builder.
         cfg.interceptor_state()
             .store_put(aws_runtime::auth::PayloadSigningOverride::UnsignedPayload);
         Ok(())
