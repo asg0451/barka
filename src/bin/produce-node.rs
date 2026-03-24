@@ -4,8 +4,6 @@ use barka::produce_node::{ProduceNode, ProduceNodeConfig, ProducerBatchLimits, T
 use barka::producer;
 use barka::s3::{self, S3Config};
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Clone, Debug)]
 struct TopicConfigs(Vec<TopicConfig>);
@@ -135,10 +133,7 @@ impl Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_span_events(FmtSpan::CLOSE)
-        .init();
+    barka::tracing_init::init_tracing();
 
     let cli = Cli::parse();
     let config = cli.node_config();

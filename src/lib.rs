@@ -18,3 +18,4 @@ pub mod s3;
 pub mod segment;
 #[cfg(test)]
 pub mod test_util;
+pub mod tracing_init;
