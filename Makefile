@@ -38,12 +38,14 @@ localstack:
 localstack-down:
 	$(CONTAINER_RT) rm -f barka-localstack 2>/dev/null || true
 
-NODES ?= 1
+NODES ?= 3
+PARTITIONS ?= 4
 
 jepsen: build localstack
 	cd jepsen/barka && CLASSPATH= lein run test \
 		--bin-dir $(CURDIR)/target/debug \
-		--num-nodes $(NODES)
+		--num-nodes $(NODES) \
+		--num-partitions $(PARTITIONS)
 
 brew-install-lein:
 	brew install leiningen
