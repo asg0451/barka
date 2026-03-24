@@ -130,6 +130,8 @@ struct JsonlRequest {
     #[serde(default)]
     value: Option<String>,
     #[serde(default)]
+    values: Option<Vec<String>>,
+    #[serde(default)]
     offset: u64,
     #[serde(default = "default_max")]
     max: u32,
@@ -149,6 +151,8 @@ struct JsonlResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    offsets: Option<Vec<u64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     next_offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     values: Option<Vec<String>>,
@@ -163,6 +167,7 @@ async fn handle_json_line(state: &mut SessionState, line: &str) -> JsonlResponse
             return JsonlResponse {
                 ok: false,
                 offset: None,
+                offsets: None,
                 next_offset: None,
                 values: None,
                 error: Some(format!("bad request: {e}")),
@@ -172,25 +177,32 @@ async fn handle_json_line(state: &mut SessionState, line: &str) -> JsonlResponse
 
     match req.op.as_str() {
         "produce" => {
-            let value = req.value.unwrap_or_default().into_bytes();
+            let vals: Vec<Vec<u8>> = if let Some(vs) = req.values {
+                vs.into_iter().map(|s| s.into_bytes()).collect()
+            } else {
+                vec![req.value.unwrap_or_default().into_bytes()]
+            };
             match tokio::time::timeout(
                 REQUEST_TIMEOUT,
-                state
-                    .produce
-                    .produce(&req.topic, req.partition, vec![value]),
+                state.produce.produce(&req.topic, req.partition, vals),
             )
             .await
             {
-                Ok(Ok(records)) => JsonlResponse {
-                    ok: true,
-                    offset: records.first().map(|r| r.offset),
-                    next_offset: None,
-                    values: None,
-                    error: None,
-                },
+                Ok(Ok(records)) => {
+                    let all_offsets: Vec<u64> = records.iter().map(|r| r.offset).collect();
+                    JsonlResponse {
+                        ok: true,
+                        offset: all_offsets.first().copied(),
+                        offsets: Some(all_offsets),
+                        next_offset: None,
+                        values: None,
+                        error: None,
+                    }
+                }
                 Ok(Err(e)) => JsonlResponse {
                     ok: false,
                     offset: None,
+                    offsets: None,
                     next_offset: None,
                     values: None,
                     error: Some(e.to_string()),
@@ -205,6 +217,7 @@ async fn handle_json_line(state: &mut SessionState, line: &str) -> JsonlResponse
                     JsonlResponse {
                         ok: false,
                         offset: None,
+                        offsets: None,
                         next_offset: None,
                         values: None,
                         error: Some(format!("request timed out after {:?}", REQUEST_TIMEOUT)),
@@ -230,6 +243,7 @@ async fn handle_json_line(state: &mut SessionState, line: &str) -> JsonlResponse
                     JsonlResponse {
                         ok: true,
                         offset: None,
+                        offsets: None,
                         next_offset,
                         values: Some(values),
                         error: None,
@@ -238,6 +252,7 @@ async fn handle_json_line(state: &mut SessionState, line: &str) -> JsonlResponse
                 Ok(Err(e)) => JsonlResponse {
                     ok: false,
                     offset: None,
+                    offsets: None,
                     next_offset: None,
                     values: None,
                     error: Some(e.to_string()),
@@ -252,6 +267,7 @@ async fn handle_json_line(state: &mut SessionState, line: &str) -> JsonlResponse
                     JsonlResponse {
                         ok: false,
                         offset: None,
+                        offsets: None,
                         next_offset: None,
                         values: None,
                         error: Some(format!("request timed out after {:?}", REQUEST_TIMEOUT)),
@@ -263,6 +279,7 @@ async fn handle_json_line(state: &mut SessionState, line: &str) -> JsonlResponse
         other => JsonlResponse {
             ok: false,
             offset: None,
+            offsets: None,
             next_offset: None,
             values: None,
             error: Some(format!("unknown op: {other}")),
@@ -285,6 +302,7 @@ async fn handle_abdicate(state: &SessionState, req: &JsonlRequest) -> JsonlRespo
             return JsonlResponse {
                 ok: true,
                 offset: None,
+                offsets: None,
                 next_offset: None,
                 values: None,
                 error: None,
@@ -294,6 +312,7 @@ async fn handle_abdicate(state: &SessionState, req: &JsonlRequest) -> JsonlRespo
             return JsonlResponse {
                 ok: false,
                 offset: None,
+                offsets: None,
                 next_offset: None,
                 values: None,
                 error: Some(format!("leader discovery failed: {e}")),
@@ -320,6 +339,7 @@ async fn handle_abdicate(state: &SessionState, req: &JsonlRequest) -> JsonlRespo
                 JsonlResponse {
                     ok: true,
                     offset: None,
+                    offsets: None,
                     next_offset: None,
                     values: None,
                     error: None,
@@ -328,6 +348,7 @@ async fn handle_abdicate(state: &SessionState, req: &JsonlRequest) -> JsonlRespo
             Ok(false) => JsonlResponse {
                 ok: true,
                 offset: None,
+                offsets: None,
                 next_offset: None,
                 values: None,
                 error: None,
@@ -335,6 +356,7 @@ async fn handle_abdicate(state: &SessionState, req: &JsonlRequest) -> JsonlRespo
             Err(e) => JsonlResponse {
                 ok: false,
                 offset: None,
+                offsets: None,
                 next_offset: None,
                 values: None,
                 error: Some(format!("abdicate RPC failed: {e}")),
@@ -343,6 +365,7 @@ async fn handle_abdicate(state: &SessionState, req: &JsonlRequest) -> JsonlRespo
         Err(e) => JsonlResponse {
             ok: false,
             offset: None,
+            offsets: None,
             next_offset: None,
             values: None,
             error: Some(format!("connect to leader failed: {e}")),

@@ -2,9 +2,14 @@
   "Jepsen test for barka distributed log.
 
    Workload: multi-partition log correctness with rebalancer chaos.
-   - :produce appends a uniquely identified value to a random partition
+   - :produce appends values to a random partition (single or batch)
    - :consume reads the next unconsumed value from a partition (per-partition offset)
-   - Checker validates: per-partition ordering, global completeness (no lost/dupes)"
+   - Checker validates:
+     1. Intra-batch ordering: offsets within a batch are strictly increasing
+     2. Real-time ordering: if produce A completes before B is invoked (same
+        partition), max(A.offsets) < min(B.offsets)
+     3. Offset monotonicity and uniqueness per partition
+     4. Consumed-offset ordering and global completeness (no lost/dupes)"
   (:require [clojure.tools.logging :refer [info warn]]
             [jepsen
              [checker :as checker]
@@ -19,83 +24,183 @@
             [jepsen.barka.nemesis :as barka-nemesis])
   (:import (java.util UUID)))
 
+(defn- normalize-produce
+  "Normalizes a completed produce op to always have :values and :offsets vecs."
+  [op]
+  (if (:values op)
+    op
+    (assoc op :values [(:value op)] :offsets [(:offset op)])))
+
 (defn- offsets-monotonic?
   "Returns true if the given sequence of offsets is strictly increasing."
   [offsets]
   (every? (fn [[a b]] (< a b)) (partition 2 1 offsets)))
 
 (defn- offsets-unique?
-  "Returns true if no two ops share the same offset."
-  [ops]
-  (= (count ops) (count (distinct (map :offset ops)))))
+  "Returns true if no two offsets in the seq are the same."
+  [offsets]
+  (= (count offsets) (count (distinct offsets))))
 
 (defn log-checker
-  "Checks that every produced value is consumed exactly once, in offset order
-   within each partition. Handles indeterminate (:info) produces correctly —
-   they may or may not have succeeded, so they are excluded from both the
-   'lost' and 'unexpected' sets. Also checks offset monotonicity and uniqueness."
+  "Checks ordering invariants and completeness for the distributed log.
+
+   Invariants per partition:
+   1. Intra-batch: each batch produce's offsets are strictly increasing
+   2. Real-time: if produce A :ok precedes produce B :invoke in history,
+      max(A.offsets) < min(B.offsets)
+   3. Offset monotonicity and uniqueness across all produces per partition
+   4. Consumed values appear in server-assigned offset order
+   5. Completeness: no lost values, no unexpected values, no duplicates
+
+   Handles indeterminate (:info) produces correctly — they may or may not
+   have succeeded, so they are excluded from both 'lost' and 'unexpected'."
   []
   (reify checker/Checker
     (check [this test history opts]
-      (let [ok-produces   (->> history
-                               (filter #(and (= :produce (:f %)) (= :ok (:type %)))))
+      (let [;; Ensure every op has an :index for real-time ordering
+            history (if (:index (first history))
+                      history
+                      (map-indexed (fn [i op] (assoc op :index i)) history))
+
+            ok-produces (->> history
+                             (filter #(and (= :produce (:f %)) (= :ok (:type %))))
+                             (mapv normalize-produce))
             info-produces (->> history
                                (filter #(and (= :produce (:f %)) (= :info (:type %)))))
-            ok-consumes   (->> history
-                               (filter #(and (= :consume (:f %)) (= :ok (:type %)))))
+            ok-consumes (->> history
+                             (filter #(and (= :consume (:f %)) (= :ok (:type %)))))
 
-            ;; Per-partition analysis
+            ;; --- Invariant 1: Intra-batch monotonicity ---
+            batch-violations
+            (->> ok-produces
+                 (filter #(> (count (:offsets %)) 1))
+                 (remove (fn [op]
+                           (every? (fn [[a b]] (< a b))
+                                   (partition 2 1 (:offsets op)))))
+                 (mapv (fn [op] {:values (:values op) :offsets (:offsets op)})))
+
+            ;; --- Invariant 2: Real-time ordering ---
+            produce-pairs
+            (:pairs
+              (reduce
+                (fn [state op]
+                  (cond
+                    (and (= :produce (:f op)) (= :invoke (:type op)))
+                    (assoc-in state [:last-invoke (:process op)] (:index op))
+
+                    (and (= :produce (:f op)) (= :ok (:type op)))
+                    (let [inv-idx (get-in state [:last-invoke (:process op)])
+                          norm    (normalize-produce op)]
+                      (update state :pairs conj
+                              {:invoke-idx inv-idx
+                               :ok-idx     (:index op)
+                               :partition  (:partition op)
+                               :offsets    (:offsets norm)}))
+
+                    :else state))
+                {:last-invoke {} :pairs []}
+                history))
+
+            pairs-by-p (group-by :partition produce-pairs)
+            rt-violations
+            (into []
+              (mapcat
+                (fn [[p pairs]]
+                  (let [sorted (vec (sort-by :ok-idx pairs))]
+                    (for [i (range (count sorted))
+                          j (range (inc i) (count sorted))
+                          :let [a (nth sorted i)
+                                b (nth sorted j)]
+                          :when (< (:ok-idx a) (:invoke-idx b))
+                          :let [max-a (apply max (:offsets a))
+                                min-b (apply min (:offsets b))]
+                          :when (>= max-a min-b)]
+                      {:partition    p
+                       :a-offsets    (:offsets a)
+                       :a-ok-idx     (:ok-idx a)
+                       :b-offsets    (:offsets b)
+                       :b-invoke-idx (:invoke-idx b)})))
+                pairs-by-p))
+
+            ;; --- Invariant 3: Per-partition offset monotonicity & uniqueness ---
             produces-by-p (group-by :partition ok-produces)
             consumes-by-p (group-by :partition ok-consumes)
+
+            all-offsets-by-p
+            (into {}
+              (map (fn [[p produces]]
+                     [p (->> produces
+                             (mapcat :offsets)
+                             sort
+                             vec)])
+                   produces-by-p))
+
+            offset-monotonic-by-p
+            (into {} (map (fn [[p offs]] [p (offsets-monotonic? offs)])
+                          all-offsets-by-p))
+
+            offset-unique-by-p
+            (into {} (map (fn [[p offs]] [p (offsets-unique? offs)])
+                          all-offsets-by-p))
+
+            ;; --- Invariant 4: Consumed ordering + completeness ---
             partition-results
             (into {}
               (map (fn [[p produces]]
-                     (let [sorted    (->> produces (sort-by :offset))
-                           expected  (mapv :value sorted)
-                           offsets   (mapv :offset sorted)
-                           consumed  (mapv :value (get consumes-by-p p []))
-                           dups      (- (count consumed) (count (distinct consumed)))]
-                       [p {:produced          (count produces)
+                     (let [vos      (mapcat (fn [op] (map vector (:values op) (:offsets op)))
+                                            produces)
+                           expected (->> vos (sort-by second) (mapv first))
+                           consumed (mapv :value (get consumes-by-p p []))
+                           dups     (- (count consumed) (count (distinct consumed)))]
+                       [p {:produced          (count vos)
                            :consumed          (count consumed)
                            :duplicates        dups
-                           :offsets-monotonic? (offsets-monotonic? offsets)
-                           :offsets-unique?    (offsets-unique? sorted)
+                           :offsets-monotonic? (get offset-monotonic-by-p p true)
+                           :offsets-unique?    (get offset-unique-by-p p true)
                            :ordered?          (= consumed
                                                 (vec (take (count consumed) expected)))}]))
                    produces-by-p))
 
-            ;; Global completeness (with indeterminate handling)
-            all-produced    (set (map :value ok-produces))
-            maybe-produced  (set (map :value info-produces))
+            ;; --- Invariant 5: Global completeness (with indeterminate handling) ---
+            all-produced (set (mapcat :values ok-produces))
+            info-produce-values
+            (->> info-produces
+                 (mapcat #(or (:values %) [(:value %)])))
+            maybe-produced (set info-produce-values)
+            all-possibly-produced (into all-produced maybe-produced)
             all-consumed    (mapv :value ok-consumes)
             consumed-set    (set all-consumed)
             duplicates      (- (count all-consumed) (count consumed-set))
-            ;; Lost: produced OK but never consumed, excluding indeterminate
             lost            (vec (remove consumed-set all-produced))
-            ;; Unexpected: consumed but never produced OK (indeterminate allowed)
-            unexpected      (vec (remove (into all-produced maybe-produced) all-consumed))
+            unexpected      (vec (remove all-possibly-produced all-consumed))
             all-ordered?    (every? :ordered? (vals partition-results))
             all-monotonic?  (every? :offsets-monotonic? (vals partition-results))
             all-unique?     (every? :offsets-unique? (vals partition-results))
-            valid?          (and (empty? lost)
+            valid?          (and (empty? batch-violations)
+                                 (empty? rt-violations)
+                                 (empty? lost)
                                  (empty? unexpected)
                                  (zero? duplicates)
                                  all-ordered?
                                  all-monotonic?
                                  all-unique?)]
-        {:valid?            valid?
-         :partitions        partition-results
-         :produced          (count all-produced)
-         :indeterminate     (count maybe-produced)
-         :consumed          (count consumed-set)
-         :duplicates        duplicates
-         :lost              (count lost)
-         :lost-values       (take 10 lost)
-         :unexpected        (count unexpected)
-         :unexpected-values (take 10 unexpected)
-         :in-order?         all-ordered?
-         :offsets-monotonic? all-monotonic?
-         :offsets-unique?   all-unique?}))))
+        {:valid?                  valid?
+         :batch-violations        (count batch-violations)
+         :batch-violation-examples (take 5 batch-violations)
+         :rt-violations           (count rt-violations)
+         :rt-violation-examples   (take 5 rt-violations)
+         :partitions              partition-results
+         :produced                (count all-produced)
+         :indeterminate           (count maybe-produced)
+         :consumed                (count consumed-set)
+         :duplicates              duplicates
+         :lost                    (count lost)
+         :lost-values             (take 10 lost)
+         :unexpected              (count unexpected)
+         :unexpected-values       (take 10 unexpected)
+         :in-order?               all-ordered?
+         :offsets-monotonic?      all-monotonic?
+         :offsets-unique?         all-unique?}))))
 
 (def next-value (atom 0))
 
@@ -125,8 +230,13 @@
           (try
             (case (:f op)
               :produce
-              (let [offset (barka/produce! c "default" (:partition op) (:value op))]
-                (assoc op :type :ok :offset offset))
+              (if (:values op)
+                ;; Batch produce
+                (let [offsets (barka/produce-batch! c "default" (:partition op) (:values op))]
+                  (assoc op :type :ok :offsets offsets))
+                ;; Single produce
+                (let [offset (barka/produce! c "default" (:partition op) (:value op))]
+                  (assoc op :type :ok :offset offset)))
 
               :consume
               (let [p        (:partition op)
@@ -185,12 +295,20 @@
         pick-partition  (if hotspot
                           #(if (< (rand) 0.7) hotspot (rand-int num-partitions))
                           #(rand-int num-partitions))
-        ;; Weight produce vs consume generators
+        ;; Produce generator: 50/50 single vs batch
         produce-gen     (fn [_ _]
-                          {:type      :invoke
-                           :f         :produce
-                           :value     (swap! next-value inc)
-                           :partition (pick-partition)})
+                          (let [p (pick-partition)]
+                            (if (< (rand) 0.5)
+                              {:type      :invoke
+                               :f         :produce
+                               :value     (swap! next-value inc)
+                               :partition p}
+                              (let [batch-size (+ 2 (rand-int 4))
+                                    vals (vec (repeatedly batch-size #(swap! next-value inc)))]
+                                {:type      :invoke
+                                 :f         :produce
+                                 :values    vals
+                                 :partition p}))))
         consume-gen     (fn [_ _]
                           {:type      :invoke
                            :f         :consume
@@ -201,12 +319,10 @@
                            :partition (rand-int num-partitions)})
         client-gens     (if (== produce-ratio 0.5)
                           [produce-gen consume-gen]
-                          ;; Approximate ratio via weighted mix
                           (let [p-weight (int (* 10 produce-ratio))
                                 c-weight (- 10 p-weight)]
                             (vec (concat (repeat p-weight produce-gen)
                                          (repeat c-weight consume-gen)))))
-        ;; Add replay consumer to the mix
         client-gens     (conj client-gens replay-gen)
         nemesis-gens    [(->> (fn [_ _] {:type :invoke :f :rebalance})
                               (gen/stagger 7))
