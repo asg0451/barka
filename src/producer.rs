@@ -83,10 +83,17 @@ struct FlushRound {
 }
 
 impl FlushRound {
-    fn new(participants: usize, epoch: u64, segment_seq: u64, bucket: String, key: String) -> Self {
+    fn new(
+        participants: usize,
+        epoch: u64,
+        segment_seq: u64,
+        bucket: String,
+        key: String,
+        records_capacity: usize,
+    ) -> Self {
         let (done, _) = watch::channel(None);
         Self {
-            records: Mutex::new(Vec::new()),
+            records: Mutex::new(Vec::with_capacity(records_capacity)),
             remaining: AtomicUsize::new(participants),
             done,
             epoch,
@@ -117,30 +124,9 @@ impl FlushRound {
             .unwrap()
             .as_millis() as i64;
 
-        let mut batch = Vec::with_capacity(n);
-        for rec in records.iter() {
-            let key_slice: &[u8] = rec.get_key()?;
-            let value_slice: &[u8] = rec.get_value()?;
-
-            let key = if key_slice.is_empty() {
-                Bytes::new()
-            } else {
-                message_bytes.slice_ref(key_slice)
-            };
-            let value = if value_slice.is_empty() {
-                Bytes::new()
-            } else {
-                message_bytes.slice_ref(value_slice)
-            };
-
-            batch.push(RecordData {
-                offset: 0,
-                timestamp: now_ms,
-                key,
-                value,
-            });
-        }
-
+        // Push directly into the shared vec under the lock to avoid
+        // allocating a temporary batch Vec (~640KB with n=10000).
+        // capnp field access is just pointer arithmetic — no I/O under the lock.
         let produced = {
             let mut all = self.records.lock().unwrap();
             let intra_base = all.len() as u64;
@@ -154,7 +140,29 @@ impl FlushRound {
                     log_offset::INTRA_MASK + 1
                 );
             }
-            all.extend(batch);
+            all.reserve(n);
+            for rec in records.iter() {
+                let key_slice: &[u8] = rec.get_key()?;
+                let value_slice: &[u8] = rec.get_value()?;
+
+                let key = if key_slice.is_empty() {
+                    Bytes::new()
+                } else {
+                    message_bytes.slice_ref(key_slice)
+                };
+                let value = if value_slice.is_empty() {
+                    Bytes::new()
+                } else {
+                    message_bytes.slice_ref(value_slice)
+                };
+
+                all.push(RecordData {
+                    offset: 0,
+                    timestamp: now_ms,
+                    key,
+                    value,
+                });
+            }
             (0..n)
                 .map(|i| ProducedRecord {
                     offset: compose(self.segment_seq, intra_base + i as u64),
@@ -188,18 +196,16 @@ impl FlushRound {
             rec.offset = compose(self.segment_seq, i as u64);
         }
 
-        let (chunks, total_len) = segment::encode_gather(self.epoch, &records);
+        let segment = segment::encode(self.epoch, &records);
         tracing::debug!(
             key = %self.key,
             bucket = %self.bucket,
             epoch = self.epoch,
             records = records.len(),
-            chunks = chunks.len(),
-            total_bytes = total_len,
+            total_bytes = segment.len(),
             "uploading segment to S3",
         );
-        let outcome =
-            s3::put_if_absent_stream(s3_client, &self.bucket, &self.key, chunks, total_len).await?;
+        let outcome = s3::put_if_absent(s3_client, &self.bucket, &self.key, segment).await?;
 
         if outcome == s3::PutOutcome::AlreadyExists {
             anyhow::bail!("segment {} already exists — sequence collision", self.key);
@@ -338,7 +344,12 @@ impl PartitionProducer {
         });
     }
 
-    fn create_flush_round(&self, participants: usize, epoch: u64) -> Result<Arc<FlushRound>> {
+    fn create_flush_round(
+        &self,
+        participants: usize,
+        epoch: u64,
+        records_capacity: usize,
+    ) -> Result<Arc<FlushRound>> {
         let seq = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         if seq > log_offset::MAX_SEGMENT_SEQ {
             anyhow::bail!(
@@ -353,6 +364,7 @@ impl PartitionProducer {
             seq,
             self.bucket.clone(),
             key,
+            records_capacity,
         )))
     }
 
@@ -417,7 +429,7 @@ impl PartitionProducer {
 
             if inner.is_full() {
                 let participants = inner.waiters.len() + 1;
-                let round = self.create_flush_round(participants, epoch)?;
+                let round = self.create_flush_round(participants, epoch, inner.pending_records)?;
                 for tx in inner.waiters.drain(..) {
                     let _ = tx.send(Arc::clone(&round));
                 }
@@ -460,7 +472,7 @@ impl PartitionProducer {
             }
             let participants = inner.waiters.len();
             let epoch = inner.epoch;
-            let round = self.create_flush_round(participants, epoch)?;
+            let round = self.create_flush_round(participants, epoch, inner.pending_records)?;
             let done_rx = round.done.subscribe();
             for tx in inner.waiters.drain(..) {
                 let _ = tx.send(Arc::clone(&round));

@@ -63,6 +63,41 @@ pub fn encode_gather(epoch: u64, records: &[RecordData]) -> (Vec<Bytes>, u64) {
     (chunks, total)
 }
 
+/// Encode a segment into a single contiguous buffer.
+///
+/// Trades the zero-copy property of [`encode_gather`] for a single allocation
+/// with better cache locality. The data is memcpy'd into TCP write buffers
+/// during upload anyway, so per-chunk zero-copy has limited benefit.
+pub fn encode(epoch: u64, records: &[RecordData]) -> Bytes {
+    let meta_size = HEADER_BYTES + records.len() * PER_RECORD_META;
+    let data_size: usize = records.iter().map(|r| r.key.len() + r.value.len()).sum();
+    let total = meta_size + data_size;
+
+    let mut buf = Vec::with_capacity(total);
+
+    buf.extend_from_slice(&epoch.to_le_bytes());
+    buf.extend_from_slice(&(records.len() as u32).to_le_bytes());
+
+    for rec in records {
+        buf.extend_from_slice(&rec.offset.to_le_bytes());
+        buf.extend_from_slice(&rec.timestamp.to_le_bytes());
+        buf.extend_from_slice(&(rec.key.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&(rec.value.len() as u32).to_le_bytes());
+    }
+
+    for rec in records {
+        if !rec.key.is_empty() {
+            buf.extend_from_slice(&rec.key);
+        }
+        if !rec.value.is_empty() {
+            buf.extend_from_slice(&rec.value);
+        }
+    }
+
+    debug_assert_eq!(buf.len(), total);
+    Bytes::from(buf)
+}
+
 /// Decode a segment from contiguous bytes (for consumers / tests).
 ///
 /// Key/value fields are zero-copy `Bytes::slice` views into `data`, so the
@@ -158,5 +193,47 @@ mod tests {
         assert_eq!(decoded[1].timestamp, 2000);
         assert!(decoded[1].key.is_empty());
         assert_eq!(decoded[1].value.as_ref(), b"val-only");
+    }
+
+    #[test]
+    fn encode_contiguous_matches_gather() {
+        let records = vec![
+            RecordData {
+                offset: 0,
+                timestamp: 1000,
+                key: Bytes::from_static(b"k1"),
+                value: Bytes::from_static(b"v1"),
+            },
+            RecordData {
+                offset: 1,
+                timestamp: 2000,
+                key: Bytes::new(),
+                value: Bytes::from_static(b"val-only"),
+            },
+        ];
+
+        let (chunks, len) = encode_gather(7, &records);
+        let gather_buf: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(gather_buf.len() as u64, len);
+
+        let contiguous = encode(7, &records);
+        assert_eq!(gather_buf, contiguous.as_ref());
+    }
+
+    #[test]
+    fn encode_contiguous_round_trip() {
+        let records = vec![RecordData {
+            offset: 5,
+            timestamp: 999,
+            key: Bytes::from_static(b"key"),
+            value: Bytes::from_static(b"value"),
+        }];
+        let buf = encode(3, &records);
+        let (epoch, decoded) = decode(buf).unwrap();
+        assert_eq!(epoch, 3);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].offset, 5);
+        assert_eq!(decoded[0].key.as_ref(), b"key");
+        assert_eq!(decoded[0].value.as_ref(), b"value");
     }
 }
