@@ -3,7 +3,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::prelude::*;
 
 pub fn init_tracing() {
-    if std::env::var("TOKIO_CONSOLE_BIND").is_ok() {
+    if std::env::var("TOKIO_CONSOLE_BIND").is_ok_and(|v| !v.is_empty()) {
         let console_layer = console_subscriber::spawn();
         tracing_subscriber::registry()
             .with(console_layer)

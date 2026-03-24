@@ -41,26 +41,21 @@ for i in $(seq 0 $((NUM_NODES - 1))); do
 
     if [ "$i" -eq 0 ]; then
         echo "produce-node $i: rpc=:$rpc_port  console=:$CONSOLE_PORT"
-        TOKIO_CONSOLE_BIND="127.0.0.1:$CONSOLE_PORT" \
-        RUST_LOG=barka=info RUST_BACKTRACE=1 \
-            ./target/debug/produce-node \
-            --node-id "$i" \
-            --rpc-port "$rpc_port" \
-            --s3-endpoint "$S3_ENDPOINT" \
-            --s3-prefix "$S3_PREFIX" \
-            --leader-election-prefix "$S3_PREFIX" \
-            2>&1 | sed "s/^/[node-$i] /" &
+        CONSOLE_ENV="TOKIO_CONSOLE_BIND=127.0.0.1:$CONSOLE_PORT"
     else
         echo "produce-node $i: rpc=:$rpc_port"
-        RUST_LOG=barka=info RUST_BACKTRACE=1 \
-            ./target/debug/produce-node \
-            --node-id "$i" \
-            --rpc-port "$rpc_port" \
-            --s3-endpoint "$S3_ENDPOINT" \
-            --s3-prefix "$S3_PREFIX" \
-            --leader-election-prefix "$S3_PREFIX" \
-            2>&1 | sed "s/^/[node-$i] /" &
+        CONSOLE_ENV=""
     fi
+
+    env $CONSOLE_ENV \
+    RUST_LOG=barka=info RUST_BACKTRACE=1 \
+        ./target/debug/produce-node \
+        --node-id "$i" \
+        --rpc-port "$rpc_port" \
+        --s3-endpoint "$S3_ENDPOINT" \
+        --s3-prefix "$S3_PREFIX" \
+        --leader-election-prefix "$S3_PREFIX" \
+        2>&1 | sed "s/^/[node-$i] /" &
 done
 
 echo "consume-node: rpc=:$CONSUME_PORT"
