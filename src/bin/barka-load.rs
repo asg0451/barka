@@ -1,10 +1,12 @@
 #![recursion_limit = "256"]
 
-use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use barka::leader_election;
@@ -16,6 +18,12 @@ use clap::Parser;
 
 const BASE_PRODUCE_PORT: u16 = 9292;
 const CONSUME_PORT: u16 = 9392;
+
+/// Default S3 object prefix and `--leader-election-prefix` for spawned nodes.
+const DEFAULT_LOAD_PREFIX: &str = "barka-load";
+
+/// Fixed samply `-o` path (current working directory when `barka-load` runs).
+const PROFILE_OUTPUT_GZ: &str = "barka-load-profile.json.gz";
 
 #[derive(Parser)]
 #[command(name = "barka-load", version, about = "Barka produce load tester")]
@@ -48,6 +56,10 @@ struct Cli {
     #[arg(long, default_value_t = 3)]
     nodes: u32,
 
+    /// Run produce-node 0 under `samply record` (writes `barka-load-profile.json.gz` in cwd).
+    #[arg(long)]
+    profile: bool,
+
     /// S3 endpoint URL.
     #[arg(long, default_value = "http://localhost:4566")]
     s3_endpoint: String,
@@ -56,11 +68,11 @@ struct Cli {
     #[arg(long, default_value = "barka")]
     s3_bucket: String,
 
-    /// Skip starting the cluster; requires --s3-prefix.
+    /// Skip starting the cluster (use an already-running cluster on the same prefix).
     #[arg(long)]
     skip_start: bool,
 
-    /// S3 prefix (auto-generated if not provided).
+    /// S3 data prefix and leader-election namespace override [default: barka-load].
     #[arg(long)]
     s3_prefix: Option<String>,
 }
@@ -78,15 +90,48 @@ fn bin_dir() -> Result<PathBuf> {
     Ok(exe.parent().context("exe has no parent dir")?.to_path_buf())
 }
 
-fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
+fn start_nodes(
+    cli: &Cli,
+    s3_prefix: &str,
+    profile_gz: Option<&Path>,
+) -> Result<(Vec<Child>, bool)> {
     let dir = bin_dir()?;
     let mut children = Vec::new();
+    let mut samply_wrapped_produce = false;
 
     // Produce nodes
     for i in 0..cli.nodes {
         let port = BASE_PRODUCE_PORT + (i as u16);
-        println!("  produce-node {i}: rpc=:{port}");
-        let child = std::process::Command::new(dir.join("produce-node"))
+        let produce_bin = dir.join("produce-node");
+        let mut cmd = if i == 0 {
+            if let Some(out) = profile_gz {
+                samply_wrapped_produce = true;
+                println!(
+                    "  produce-node {i}: rpc=:{port} (samply record -> {})",
+                    out.display()
+                );
+                let mut c = std::process::Command::new("samply");
+                c.arg("record")
+                    .args(["-o"])
+                    .arg(out)
+                    .arg("--save-only")
+                    .arg("--no-open")
+                    .arg("--")
+                    .arg(&produce_bin);
+                // Own process group so we can kill samply + produce-node together
+                // if the orderly shutdown (SIGTERM child → samply saves) fails.
+                #[cfg(unix)]
+                c.process_group(0);
+                c
+            } else {
+                println!("  produce-node {i}: rpc=:{port}");
+                std::process::Command::new(&produce_bin)
+            }
+        } else {
+            println!("  produce-node {i}: rpc=:{port}");
+            std::process::Command::new(&produce_bin)
+        };
+        let child = cmd
             .args(["--node-id", &i.to_string()])
             .args(["--rpc-port", &port.to_string()])
             .args(["--s3-endpoint", &cli.s3_endpoint])
@@ -132,14 +177,96 @@ fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
         .context("spawn rebalancer")?;
     children.push(child);
 
-    Ok(children)
+    Ok((children, samply_wrapped_produce))
 }
 
-fn kill_children(children: &mut [Child]) {
-    for child in children.iter_mut() {
+/// Stop the samply wrapper by terminating the profiled child underneath it.
+///
+/// samply ignores SIGTERM/SIGINT — it only saves the `-o` profile when
+/// its child process exits. So we find the child (produce-node) via
+/// `pgrep -P`, SIGTERM it, then wait for samply to flush and exit.
+/// Falls back to killing the entire process group (requires `process_group(0)`
+/// on the samply Command) so a crashed/stuck samply can't leak produce-node.
+fn terminate_samply_child(child: &mut Child, timeout: Duration) {
+    #[cfg(unix)]
+    {
+        let samply_pid = child.id();
+        let grandchildren = child_pids_of(samply_pid);
+        if grandchildren.is_empty() {
+            // samply already exited (e.g. profiling failed) — kill the
+            // whole process group to clean up any orphaned produce-node.
+            kill_process_group(samply_pid);
+            let _ = child.wait();
+            return;
+        }
+        for &cpid in &grandchildren {
+            unsafe {
+                libc::kill(cpid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {
+                    if Instant::now() > deadline {
+                        kill_process_group(samply_pid);
+                        let _ = child.wait();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => {
+                    let _ = child.wait();
+                    return;
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// SIGKILL every process in the group led by `leader_pid`.
+#[cfg(unix)]
+fn kill_process_group(leader_pid: u32) {
+    unsafe {
+        libc::kill(-(leader_pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+fn child_pids_of(parent: u32) -> Vec<u32> {
+    std::process::Command::new("pgrep")
+        .args(["-P", &parent.to_string()])
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn shutdown_cluster(children: &mut [Child], samply_wrapped_produce: bool) {
+    if samply_wrapped_produce {
+        println!("stopping profiled produce-node (up to 15s for samply profile flush)...");
+        terminate_samply_child(&mut children[0], Duration::from_secs(15));
+    }
+    for (i, child) in children.iter_mut().enumerate() {
+        if samply_wrapped_produce && i == 0 {
+            continue;
+        }
         let _ = child.kill();
     }
-    for child in children.iter_mut() {
+    for (i, child) in children.iter_mut().enumerate() {
+        if samply_wrapped_produce && i == 0 {
+            continue;
+        }
         let _ = child.wait();
     }
 }
@@ -277,27 +404,26 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let s3_prefix = match (&cli.s3_prefix, cli.skip_start) {
-        (Some(p), _) => p.clone(),
-        (None, true) => bail!("--s3-prefix is required with --skip-start"),
-        (None, false) => {
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            format!("load-{ts}")
-        }
+    let s3_prefix = cli
+        .s3_prefix
+        .clone()
+        .unwrap_or_else(|| DEFAULT_LOAD_PREFIX.to_string());
+
+    let profile_gz: Option<&Path> = if cli.profile {
+        Some(Path::new(PROFILE_OUTPUT_GZ))
+    } else {
+        None
     };
 
     // -- Start cluster --
-    let mut children = if !cli.skip_start {
+    let (mut children, samply_wrapped_produce) = if !cli.skip_start {
         println!(
             "starting {} produce-nodes + 1 consume-node + 1 rebalancer (s3-prefix={s3_prefix})",
             cli.nodes,
         );
-        start_nodes(&cli, &s3_prefix)?
+        start_nodes(&cli, &s3_prefix, profile_gz)?
     } else {
-        vec![]
+        (vec![], false)
     };
 
     let s3_config = S3Config {
@@ -410,7 +536,7 @@ fn main() -> Result<()> {
     // -- Cleanup --
     if !children.is_empty() {
         println!("\nshutting down cluster...");
-        kill_children(&mut children);
+        shutdown_cluster(&mut children, samply_wrapped_produce);
     }
 
     Ok(())

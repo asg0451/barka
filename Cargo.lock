@@ -548,6 +548,7 @@ dependencies = [
  "futures",
  "http 0.2.12",
  "http-body 0.4.6",
+ "libc",
  "lru 0.16.3",
  "rand",
  "ratatui",
