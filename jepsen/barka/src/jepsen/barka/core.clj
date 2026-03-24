@@ -127,11 +127,20 @@
                    produces-by-p))
 
             ;; Global completeness
+            ;; :ok produces are definitely written; :info are indeterminate
+            ;; (may have succeeded). For "lost": only :ok values are expected.
+            ;; For "unexpected": accept both :ok and :info values, since an
+            ;; indeterminate produce may have written to S3.
             all-produced (set (mapcat :values ok-produces))
+            info-produce-values
+            (->> history
+                 (filter #(and (= :produce (:f %)) (= :info (:type %))))
+                 (mapcat #(or (:values %) [(:value %)])))
+            all-possibly-produced (into all-produced info-produce-values)
             all-consumed (mapv :value ok-consumes)
             duplicates   (- (count all-consumed) (count (distinct all-consumed)))
             lost         (vec (remove (set all-consumed) all-produced))
-            unexpected   (vec (remove all-produced all-consumed))
+            unexpected   (vec (remove all-possibly-produced all-consumed))
             all-ordered? (every? :ordered? (vals partition-results))
             valid?       (and (empty? batch-violations)
                               (empty? rt-violations)
