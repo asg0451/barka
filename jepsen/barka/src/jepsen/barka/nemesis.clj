@@ -82,13 +82,7 @@
                 do-kill-restart
                 (fn [role]
                   (let [ropts (build-restart-opts node)]
-                    (info "nemesis: killing" (name role) "on" node)
-                    (when-let [proc (get-in @processes [node role])]
-                      (db/kill-process! proc)
-                      (swap! processes update node dissoc role))
-                    ;; Brief pause before restart
-                    (Thread/sleep (+ 1000 (rand-int 2000)))
-                    (info "nemesis: restarting" (name role) "on" node)
+                    (info "nemesis: kill+restart" (name role) "on" node)
                     (db/restart-role! processes ropts node role)))]
             (case (:f op)
               :kill-produce
@@ -104,13 +98,14 @@
                   (assoc op :type :info :value {:node node :killed :gateway}))
 
               :kill-node
-              (do (doseq [role [:gateway :produce :consume]]
-                    (when-let [proc (get-in @processes [node role])]
-                      (info "nemesis: killing" (name role) "on" node)
-                      (db/kill-process! proc)
-                      (swap! processes update node dissoc role)))
-                  (Thread/sleep (+ 1000 (rand-int 2000)))
-                  (let [ropts (build-restart-opts node)]
+              (do (let [ropts (build-restart-opts node)]
+                    ;; Kill all roles first
+                    (doseq [role [:gateway :produce :consume]]
+                      (when-let [proc (get-in @processes [node role])]
+                        (info "nemesis: killing" (name role) "on" node)
+                        (db/kill-process! proc)
+                        (swap! processes update node dissoc role)))
+                    ;; Restart in dependency order
                     (doseq [role [:produce :consume :gateway]]
                       (info "nemesis: restarting" (name role) "on" node)
                       (db/restart-role! processes ropts node role)))

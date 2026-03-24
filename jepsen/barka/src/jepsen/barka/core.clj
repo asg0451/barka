@@ -123,25 +123,29 @@
                 pairs-by-p))
 
             ;; --- Invariant 3: Per-partition offset monotonicity & uniqueness ---
+            ;; Monotonicity: offsets ordered by history time (op :index) must be
+            ;; strictly increasing. Catches non-chronological offset assignment.
+            ;; Uniqueness: no two produces share the same offset (catches split-brain).
             produces-by-p (group-by :partition ok-produces)
             consumes-by-p (group-by :partition ok-consumes)
 
-            all-offsets-by-p
+            ;; Offsets in chronological order (by produce op history index)
+            chronological-offsets-by-p
             (into {}
               (map (fn [[p produces]]
                      [p (->> produces
+                             (sort-by :index)
                              (mapcat :offsets)
-                             sort
                              vec)])
                    produces-by-p))
 
             offset-monotonic-by-p
             (into {} (map (fn [[p offs]] [p (offsets-monotonic? offs)])
-                          all-offsets-by-p))
+                          chronological-offsets-by-p))
 
             offset-unique-by-p
             (into {} (map (fn [[p offs]] [p (offsets-unique? offs)])
-                          all-offsets-by-p))
+                          chronological-offsets-by-p))
 
             ;; --- Invariant 4: Consumed ordering + completeness ---
             partition-results
@@ -173,11 +177,41 @@
             duplicates      (- (count all-consumed) (count consumed-set))
             lost            (vec (remove consumed-set all-produced))
             unexpected      (vec (remove all-possibly-produced all-consumed))
+
+            ;; --- Invariant 6: Replay consume validation ---
+            ;; Each :consume-replay returns values from offset 0. They must be
+            ;; a prefix of the expected offset-sorted produce order for that
+            ;; partition (i.e., no reordering or corruption in cached reads).
+            ok-replays  (->> history
+                             (filter #(and (= :consume-replay (:f %))
+                                          (= :ok (:type %)))))
+            ;; Build expected order per partition from produces
+            expected-by-p (into {}
+                            (map (fn [[p produces]]
+                                   [p (->> produces
+                                           (mapcat (fn [op]
+                                                     (map vector (:values op) (:offsets op))))
+                                           (sort-by second)
+                                           (mapv first))])
+                                 produces-by-p))
+            replay-violations
+            (->> ok-replays
+                 (remove (fn [op]
+                           (let [p        (:partition op)
+                                 got      (:value op)
+                                 expected (get expected-by-p p [])]
+                             (= got (vec (take (count got) expected))))))
+                 (mapv (fn [op]
+                         {:partition (:partition op)
+                          :got       (take 5 (:value op))
+                          :expected  (take 5 (get expected-by-p (:partition op) []))})))
+
             all-ordered?    (every? :ordered? (vals partition-results))
             all-monotonic?  (every? :offsets-monotonic? (vals partition-results))
             all-unique?     (every? :offsets-unique? (vals partition-results))
             valid?          (and (empty? batch-violations)
                                  (empty? rt-violations)
+                                 (empty? replay-violations)
                                  (empty? lost)
                                  (empty? unexpected)
                                  (zero? duplicates)
@@ -189,6 +223,8 @@
          :batch-violation-examples (take 5 batch-violations)
          :rt-violations           (count rt-violations)
          :rt-violation-examples   (take 5 rt-violations)
+         :replay-violations       (count replay-violations)
+         :replay-violation-examples (take 5 replay-violations)
          :partitions              partition-results
          :produced                (count all-produced)
          :indeterminate           (count maybe-produced)
