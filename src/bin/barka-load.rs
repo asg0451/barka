@@ -135,7 +135,7 @@ fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
     Ok(children)
 }
 
-fn kill_children(children: &mut Vec<Child>) {
+fn kill_children(children: &mut [Child]) {
     for child in children.iter_mut() {
         let _ = child.kill();
     }
