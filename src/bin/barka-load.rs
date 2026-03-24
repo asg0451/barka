@@ -5,7 +5,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -24,6 +24,63 @@ const DEFAULT_LOAD_PREFIX: &str = "barka-load";
 
 /// Fixed samply `-o` path (current working directory when `barka-load` runs).
 const PROFILE_OUTPUT_GZ: &str = "barka-load-profile.json.gz";
+
+// ---------------------------------------------------------------------------
+// Process-group cleanup: every child gets `process_group(0)` so its PGID
+// equals its PID.  We record PGIDs here so a signal handler can SIGKILL all
+// groups on Ctrl-C / SIGTERM — no orphans regardless of how we exit.
+// ---------------------------------------------------------------------------
+const MAX_CHILDREN: usize = 16;
+#[allow(clippy::declare_interior_mutable_const)]
+static CHILD_PGIDS: [AtomicU32; MAX_CHILDREN] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; MAX_CHILDREN]
+};
+static CHILD_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn register_child_pgid(pid: u32) {
+    let idx = CHILD_COUNT.fetch_add(1, Ordering::Relaxed);
+    if idx < MAX_CHILDREN {
+        CHILD_PGIDS[idx].store(pid, Ordering::Relaxed);
+    }
+}
+
+#[cfg(unix)]
+#[allow(clippy::needless_range_loop)]
+fn kill_all_child_groups() {
+    let count = CHILD_COUNT.load(Ordering::Relaxed).min(MAX_CHILDREN);
+    for i in 0..count {
+        let pgid = CHILD_PGIDS[i].load(Ordering::Relaxed);
+        if pgid > 0 {
+            unsafe {
+                libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn cleanup_signal_handler(sig: libc::c_int) {
+    kill_all_child_groups();
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+#[cfg(unix)]
+fn install_signal_handlers() {
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            cleanup_signal_handler as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            cleanup_signal_handler as *const () as libc::sighandler_t,
+        );
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "barka-load", version, about = "Barka produce load tester")]
@@ -51,6 +108,10 @@ struct Cli {
     /// Bytes per record value.
     #[arg(long, default_value_t = 1024)]
     record_size: usize,
+
+    /// Concurrent in-flight produce calls per worker thread.
+    #[arg(long, default_value_t = 1)]
+    concurrency: usize,
 
     /// Number of produce nodes to start.
     #[arg(long, default_value_t = 3)]
@@ -90,6 +151,16 @@ fn bin_dir() -> Result<PathBuf> {
     Ok(exe.parent().context("exe has no parent dir")?.to_path_buf())
 }
 
+/// Spawn a command, putting it in its own process group and registering it for
+/// cleanup.  Every child must go through here so the signal handler can reap it.
+fn spawn_in_own_pgroup(cmd: &mut std::process::Command) -> Result<Child> {
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = cmd.spawn()?;
+    register_child_pgid(child.id());
+    Ok(child)
+}
+
 fn start_nodes(
     cli: &Cli,
     s3_prefix: &str,
@@ -118,10 +189,6 @@ fn start_nodes(
                     .arg("--no-open")
                     .arg("--")
                     .arg(&produce_bin);
-                // Own process group so we can kill samply + produce-node together
-                // if the orderly shutdown (SIGTERM child → samply saves) fails.
-                #[cfg(unix)]
-                c.process_group(0);
                 c
             } else {
                 println!("  produce-node {i}: rpc=:{port}");
@@ -131,50 +198,52 @@ fn start_nodes(
             println!("  produce-node {i}: rpc=:{port}");
             std::process::Command::new(&produce_bin)
         };
-        let child = cmd
-            .args(["--node-id", &i.to_string()])
-            .args(["--rpc-port", &port.to_string()])
-            .args(["--s3-endpoint", &cli.s3_endpoint])
-            .args(["--s3-bucket", &cli.s3_bucket])
-            .args(["--s3-prefix", s3_prefix])
-            .args(["--leader-election-prefix", s3_prefix])
-            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
-            .env("RUST_BACKTRACE", "1")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()
-            .with_context(|| format!("spawn produce-node {i}"))?;
+        let child = spawn_in_own_pgroup(
+            cmd.args(["--node-id", &i.to_string()])
+                .args(["--rpc-port", &port.to_string()])
+                .args(["--s3-endpoint", &cli.s3_endpoint])
+                .args(["--s3-bucket", &cli.s3_bucket])
+                .args(["--s3-prefix", s3_prefix])
+                .args(["--leader-election-prefix", s3_prefix])
+                .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
+                .env("RUST_BACKTRACE", "1")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::inherit()),
+        )
+        .with_context(|| format!("spawn produce-node {i}"))?;
         children.push(child);
     }
 
     // Consume node
     println!("  consume-node: rpc=:{CONSUME_PORT}");
-    let child = std::process::Command::new(dir.join("consume-node"))
-        .args(["--rpc-port", &CONSUME_PORT.to_string()])
-        .args(["--s3-endpoint", &cli.s3_endpoint])
-        .args(["--s3-bucket", &cli.s3_bucket])
-        .args(["--s3-prefix", s3_prefix])
-        .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
-        .env("RUST_BACKTRACE", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("spawn consume-node")?;
+    let child = spawn_in_own_pgroup(
+        std::process::Command::new(dir.join("consume-node"))
+            .args(["--rpc-port", &CONSUME_PORT.to_string()])
+            .args(["--s3-endpoint", &cli.s3_endpoint])
+            .args(["--s3-bucket", &cli.s3_bucket])
+            .args(["--s3-prefix", s3_prefix])
+            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
+            .env("RUST_BACKTRACE", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit()),
+    )
+    .context("spawn consume-node")?;
     children.push(child);
 
     // Rebalancer
     println!("  rebalancer: interval=30s");
-    let child = std::process::Command::new(dir.join("rebalancer"))
-        .args(["--s3-endpoint", &cli.s3_endpoint])
-        .args(["--s3-bucket", &cli.s3_bucket])
-        .args(["--leader-election-prefix", s3_prefix])
-        .args(["--interval-secs", "30"])
-        .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
-        .env("RUST_BACKTRACE", "1")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("spawn rebalancer")?;
+    let child = spawn_in_own_pgroup(
+        std::process::Command::new(dir.join("rebalancer"))
+            .args(["--s3-endpoint", &cli.s3_endpoint])
+            .args(["--s3-bucket", &cli.s3_bucket])
+            .args(["--leader-election-prefix", s3_prefix])
+            .args(["--interval-secs", "30"])
+            .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
+            .env("RUST_BACKTRACE", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit()),
+    )
+    .context("spawn rebalancer")?;
     children.push(child);
 
     Ok((children, samply_wrapped_produce))
@@ -183,19 +252,19 @@ fn start_nodes(
 /// Stop the samply wrapper by terminating the profiled child underneath it.
 ///
 /// samply ignores SIGTERM/SIGINT — it only saves the `-o` profile when
-/// its child process exits. So we find the child (produce-node) via
+/// its child process exits.  We find the child (produce-node) via
 /// `pgrep -P`, SIGTERM it, then wait for samply to flush and exit.
-/// Falls back to killing the entire process group (requires `process_group(0)`
-/// on the samply Command) so a crashed/stuck samply can't leak produce-node.
+/// Falls back to SIGKILL of the process group.
 fn terminate_samply_child(child: &mut Child, timeout: Duration) {
     #[cfg(unix)]
     {
         let samply_pid = child.id();
         let grandchildren = child_pids_of(samply_pid);
         if grandchildren.is_empty() {
-            // samply already exited (e.g. profiling failed) — kill the
-            // whole process group to clean up any orphaned produce-node.
-            kill_process_group(samply_pid);
+            // samply already exited — group-kill to clean up any orphan.
+            unsafe {
+                libc::kill(-(samply_pid as libc::pid_t), libc::SIGKILL);
+            }
             let _ = child.wait();
             return;
         }
@@ -210,7 +279,9 @@ fn terminate_samply_child(child: &mut Child, timeout: Duration) {
                 Ok(Some(_)) => return,
                 Ok(None) => {
                     if Instant::now() > deadline {
-                        kill_process_group(samply_pid);
+                        unsafe {
+                            libc::kill(-(samply_pid as libc::pid_t), libc::SIGKILL);
+                        }
                         let _ = child.wait();
                         return;
                     }
@@ -230,14 +301,6 @@ fn terminate_samply_child(child: &mut Child, timeout: Duration) {
     }
 }
 
-/// SIGKILL every process in the group led by `leader_pid`.
-#[cfg(unix)]
-fn kill_process_group(leader_pid: u32) {
-    unsafe {
-        libc::kill(-(leader_pid as libc::pid_t), libc::SIGKILL);
-    }
-}
-
 fn child_pids_of(parent: u32) -> Vec<u32> {
     std::process::Command::new("pgrep")
         .args(["-P", &parent.to_string()])
@@ -253,10 +316,12 @@ fn child_pids_of(parent: u32) -> Vec<u32> {
 }
 
 fn shutdown_cluster(children: &mut [Child], samply_wrapped_produce: bool) {
+    // Orderly samply shutdown: SIGTERM produce-node → samply saves profile → exits.
     if samply_wrapped_produce {
         println!("stopping profiled produce-node (up to 15s for samply profile flush)...");
         terminate_samply_child(&mut children[0], Duration::from_secs(15));
     }
+    // Kill remaining children.
     for (i, child) in children.iter_mut().enumerate() {
         if samply_wrapped_produce && i == 0 {
             continue;
@@ -269,6 +334,9 @@ fn shutdown_cluster(children: &mut [Child], samply_wrapped_produce: bool) {
         }
         let _ = child.wait();
     }
+    // Safety net: SIGKILL every child process group in case anything leaked.
+    #[cfg(unix)]
+    kill_all_child_groups();
 }
 
 async fn wait_for_leaders(
@@ -302,6 +370,17 @@ async fn wait_for_leaders(
     }
 }
 
+/// Poll the stop flag, completing when it becomes true.
+async fn poll_stop(stop: &AtomicBool) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_worker(
     worker_id: usize,
     partition: u32,
@@ -310,6 +389,7 @@ fn run_worker(
     le_prefix: Option<String>,
     batch: Vec<Vec<u8>>,
     stop: Arc<AtomicBool>,
+    concurrency: usize,
 ) -> WorkerMetrics {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -317,39 +397,77 @@ fn run_worker(
         .expect("tokio runtime");
 
     let batch_bytes: u64 = batch.iter().map(|v| v.len() as u64).sum();
-    let mut metrics = WorkerMetrics {
-        records_produced: 0,
-        bytes_produced: 0,
-        errors: 0,
-        latencies: Vec::with_capacity(4096),
-    };
 
     rt.block_on(async {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let mut router = ProduceRouter::new(&s3_config, le_prefix).await;
+                let mut handles = Vec::with_capacity(concurrency);
+                for _ in 0..concurrency {
+                    let topic = topic.clone();
+                    let s3_config = s3_config.clone();
+                    let le_prefix = le_prefix.clone();
+                    let batch = batch.clone();
+                    let stop = stop.clone();
+                    handles.push(tokio::task::spawn_local(async move {
+                        let mut router = ProduceRouter::new(&s3_config, le_prefix).await;
+                        let mut m = WorkerMetrics {
+                            records_produced: 0,
+                            bytes_produced: 0,
+                            errors: 0,
+                            latencies: Vec::with_capacity(4096),
+                        };
+                        while !stop.load(Ordering::Relaxed) {
+                            let start = Instant::now();
+                            // Cancel in-flight produce when the stop flag is set
+                            // so workers don't get stuck in retry backoff.
+                            let result = tokio::select! {
+                                biased;
+                                r = router.produce(&topic, partition, batch.clone()) => Some(r),
+                                _ = poll_stop(&stop) => None,
+                            };
+                            match result {
+                                Some(Ok(records)) => {
+                                    m.records_produced += records.len() as u64;
+                                    m.bytes_produced += batch_bytes;
+                                    m.latencies.push(start.elapsed());
+                                }
+                                Some(Err(e)) => {
+                                    tracing::warn!(
+                                        worker = worker_id,
+                                        error = %e,
+                                        "produce failed"
+                                    );
+                                    m.errors += 1;
+                                }
+                                None => break,
+                            }
+                        }
+                        m
+                    }));
+                }
 
-                while !stop.load(Ordering::Relaxed) {
-                    let start = Instant::now();
-                    match router.produce(&topic, partition, batch.clone()).await {
-                        Ok(records) => {
-                            let elapsed = start.elapsed();
-                            metrics.records_produced += records.len() as u64;
-                            metrics.bytes_produced += batch_bytes;
-                            metrics.latencies.push(elapsed);
+                let mut agg = WorkerMetrics {
+                    records_produced: 0,
+                    bytes_produced: 0,
+                    errors: 0,
+                    latencies: Vec::new(),
+                };
+                for handle in handles {
+                    match handle.await {
+                        Ok(m) => {
+                            agg.records_produced += m.records_produced;
+                            agg.bytes_produced += m.bytes_produced;
+                            agg.errors += m.errors;
+                            agg.latencies.extend(m.latencies);
                         }
-                        Err(e) => {
-                            tracing::warn!(worker = worker_id, error = %e, "produce failed");
-                            metrics.errors += 1;
-                        }
+                        Err(_) => agg.errors += 1,
                     }
                 }
+                agg
             })
-            .await;
-    });
-
-    metrics
+            .await
+    })
 }
 
 fn print_metrics(cli: &Cli, all_metrics: Vec<WorkerMetrics>, actual_duration: Duration) {
@@ -370,8 +488,11 @@ fn print_metrics(cli: &Cli, all_metrics: Vec<WorkerMetrics>, actual_duration: Du
     println!("=== Load Test Results ===");
     println!("Duration:      {:.1}s", secs);
     println!(
-        "Workers:       {}  Partitions: {}",
-        cli.workers, cli.partitions,
+        "Workers:       {} x {} concurrency ({} connections)  Partitions: {}",
+        cli.workers,
+        cli.concurrency,
+        cli.workers * cli.concurrency,
+        cli.partitions,
     );
     println!("Batch size:    {} x {}B", cli.batch_size, cli.record_size);
     println!("Records:       {total_records}");
@@ -401,6 +522,9 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+
+    #[cfg(unix)]
+    install_signal_handlers();
 
     let cli = Cli::parse();
 
@@ -481,9 +605,10 @@ fn main() -> Result<()> {
     // -- Run load test --
     let stop = Arc::new(AtomicBool::new(false));
 
+    let concurrency = cli.concurrency;
     println!(
-        "starting load test: {} workers, {}s duration",
-        cli.workers, cli.duration,
+        "starting load test: {} workers x {} concurrency, {}s duration",
+        cli.workers, concurrency, cli.duration,
     );
 
     let wall_start = Instant::now();
@@ -507,7 +632,18 @@ fn main() -> Result<()> {
             let stop = stop.clone();
             std::thread::Builder::new()
                 .name(format!("worker-{i}"))
-                .spawn(move || run_worker(i, partition, topic, s3_config, le_prefix, batch, stop))
+                .spawn(move || {
+                    run_worker(
+                        i,
+                        partition,
+                        topic,
+                        s3_config,
+                        le_prefix,
+                        batch,
+                        stop,
+                        concurrency,
+                    )
+                })
                 .expect("spawn worker thread")
         })
         .collect();
