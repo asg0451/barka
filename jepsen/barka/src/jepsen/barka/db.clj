@@ -204,8 +204,10 @@
   "Constructs a Jepsen db that manages barka.
    Starts three processes per node: produce-node, consume-node, jepsen-gateway.
    Expects :run-id, :s3-prefix, and :num-partitions in opts.
-   The `processes` atom is shared with the nemesis for kill/restart."
-  [opts processes]
+   The `processes` and `log-dirs` atoms are shared with the nemesis for
+   kill/restart — they are NOT stored on the test map (Jepsen's Fressian
+   serializer cannot handle Process objects)."
+  [opts processes log-dirs]
   (let [run-id         (:run-id opts)
         num-partitions (get opts :num-partitions 4)]
     (reify db/DB
@@ -216,7 +218,6 @@
               gw-port          (jepsen-gateway-port-for node)
               log-dir          (store/path! test "barka-logs" (str node))
               _                (.mkdirs (java.io.File. (str log-dir)))
-              ;; Stash log-dir in opts for restart helpers
               opts             (assoc opts :log-dir {node (str log-dir)})]
 
           (info "starting barka" node
@@ -225,8 +226,7 @@
                 "jepsen-gateway=" gw-port
                 "partitions=" num-partitions)
 
-          ;; Store opts with log-dir on the test for nemesis use
-          (swap! (:barka-log-dirs test) assoc node (str log-dir))
+          (swap! log-dirs assoc node (str log-dir))
 
           ;; 1. produce-node
           (let [proc (start-produce-node! opts node)]

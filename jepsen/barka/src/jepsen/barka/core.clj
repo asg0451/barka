@@ -291,7 +291,10 @@
         processes       (atom {})
         log-dirs        (atom {})
         opts            (assoc opts :run-id run-id :s3-prefix s3-prefix)
-        nemesis-opts    (assoc opts :barka-processes processes)
+        nemesis-opts    (assoc opts
+                               :barka-processes processes
+                               :barka-log-dirs  log-dirs
+                               :barka-base-opts opts)
         pick-partition  (if hotspot
                           #(if (< (rand) 0.7) hotspot (rand-int num-partitions))
                           #(rand-int num-partitions))
@@ -340,10 +343,7 @@
             :concurrency     (* 2 n)
             :consume-offsets consume-offsets
             :num-partitions  num-partitions
-            :barka-opts      opts
-            :barka-processes processes
-            :barka-log-dirs  log-dirs
-            :db              (db/db opts processes)
+            :db              (db/db opts processes log-dirs)
             :client          (barka-client (atom nil) (atom nil))
             :nemesis         (barka-nemesis/combined-nemesis nemesis-opts)
             :checker         (checker/compose

@@ -58,19 +58,20 @@
 
       (teardown! [this test]))))
 
-(defn- build-restart-opts
-  "Builds the opts map needed by db/restart-role! from the test map."
-  [test node]
-  (let [base-opts (:barka-opts test)
-        log-dir   (get @(:barka-log-dirs test) node)]
-    (assoc base-opts :log-dir {node log-dir})))
-
 (defn process-nemesis
   "Creates a Jepsen nemesis that kills and restarts barka processes.
    Handles :kill-produce, :kill-consume, :kill-gateway (single role on random
-   node) and :kill-node (all three roles on a random node)."
+   node) and :kill-node (all three roles on a random node).
+   Closes over shared atoms from opts — these are NOT on the test map
+   (Jepsen's Fressian serializer can't handle Process objects)."
   [opts]
-  (let [processes (:barka-processes opts)]
+  (let [processes (:barka-processes opts)
+        log-dirs  (:barka-log-dirs opts)
+        base-opts (:barka-base-opts opts)
+        build-restart-opts
+        (fn [node]
+          (let [log-dir (get @log-dirs node)]
+            (assoc base-opts :log-dir {node log-dir})))]
     (reify nemesis/Nemesis
       (setup! [this test] this)
 
@@ -80,7 +81,7 @@
                 node  (rand-nth nodes)
                 do-kill-restart
                 (fn [role]
-                  (let [ropts (build-restart-opts test node)]
+                  (let [ropts (build-restart-opts node)]
                     (info "nemesis: killing" (name role) "on" node)
                     (when-let [proc (get-in @processes [node role])]
                       (db/kill-process! proc)
@@ -109,8 +110,7 @@
                       (db/kill-process! proc)
                       (swap! processes update node dissoc role)))
                   (Thread/sleep (+ 1000 (rand-int 2000)))
-                  ;; Restart in dependency order: produce, consume, then gateway
-                  (let [ropts (build-restart-opts test node)]
+                  (let [ropts (build-restart-opts node)]
                     (doseq [role [:produce :consume :gateway]]
                       (info "nemesis: restarting" (name role) "on" node)
                       (db/restart-role! processes ropts node role)))
