@@ -349,8 +349,7 @@
             :checker         (checker/compose
                                {:log      (log-checker)
                                 :timeline (timeline/html)
-                                :stats    (checker/stats)
-                                :perf     (checker/perf)})
+                                :stats    (checker/stats)})
             :generator       (gen/phases
                                ;; Phase 1: produce + consume with chaos
                                (gen/any
