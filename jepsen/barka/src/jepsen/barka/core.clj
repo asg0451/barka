@@ -245,8 +245,8 @@
                                                 :value     (swap! next-value inc)
                                                 :partition p}
                                                ;; Batch produce (2-5 values)
-                                               (let [n    (+ 2 (rand-int 4))
-                                                     vals (vec (repeatedly n #(swap! next-value inc)))]
+                                               (let [batch-size (+ 2 (rand-int 4))
+                                                     vals (vec (repeatedly batch-size #(swap! next-value inc)))]
                                                  {:type      :invoke
                                                   :f         :produce
                                                   :values    vals
