@@ -4,13 +4,14 @@ use std::path::PathBuf;
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use barka::leader_election;
 use barka::node::leader_namespace;
 use barka::partition_registry::PartitionRegistry;
 use barka::produce_router::ProduceRouter;
+use barka::rebalancer;
 use barka::s3::{self, S3Config};
 use clap::Parser;
 
@@ -277,17 +278,7 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    let s3_prefix = match (&cli.s3_prefix, cli.skip_start) {
-        (Some(p), _) => p.clone(),
-        (None, true) => bail!("--s3-prefix is required with --skip-start"),
-        (None, false) => {
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            format!("load-{ts}")
-        }
-    };
+    let s3_prefix = cli.s3_prefix.clone().unwrap_or("barka-load".to_string());
 
     // -- Start cluster --
     let mut children = if !cli.skip_start {
@@ -342,6 +333,37 @@ fn main() -> Result<()> {
                 )
                 .await?;
                 println!("all partitions have leaders");
+
+                // Rebalance until the cluster is even.
+                println!("rebalancing cluster...");
+                let settle_delay = Duration::from_secs(2);
+                loop {
+                    let plan = rebalancer::run_once(
+                        &s3_client,
+                        &s3_config.bucket,
+                        &registry,
+                        Some(s3_prefix.as_str()),
+                        usize::MAX,
+                        settle_delay,
+                        false,
+                    )
+                    .await?;
+
+                    if plan.abdications.is_empty() {
+                        println!("cluster is balanced: {:?}", plan.distribution);
+                        break;
+                    }
+
+                    // Wait for abdicated partitions to get new leaders.
+                    wait_for_leaders(
+                        &s3_client,
+                        &s3_config.bucket,
+                        &cli.topic,
+                        cli.partitions,
+                        Some(s3_prefix.as_str()),
+                    )
+                    .await?;
+                }
 
                 Ok::<(), anyhow::Error>(())
             })

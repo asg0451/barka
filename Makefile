@@ -1,4 +1,4 @@
-.PHONY: build check jepsen localstack localstack-down
+.PHONY: build check jepsen localstack localstack-down localstack-reload
 
 # If inside a distrobox, run container commands on the host.
 # Otherwise use podman or docker directly.
@@ -37,6 +37,9 @@ localstack:
 
 localstack-down:
 	$(CONTAINER_RT) rm -f barka-localstack 2>/dev/null || true
+
+localstack-reload: localstack-down localstack
+	@echo "LocalStack reloaded (data wiped)"
 
 NODES ?= 1
 

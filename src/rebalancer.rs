@@ -255,17 +255,17 @@ pub async fn run_once(
 
     let plan = compute_plan(&snapshot, max_abdications_per_node);
 
-    if plan.abdications.is_empty() {
-        tracing::debug!("cluster is balanced, nothing to do");
-    } else {
-        tracing::debug!(
-            node_count = plan.node_count,
-            leaderless = plan.leaderless.len(),
-            abdications = plan.abdications.len(),
-            distribution = ?plan.distribution,
-            "computed rebalance plan"
-        );
+    tracing::debug!(
+        node_count = plan.node_count,
+        leaderless = plan.leaderless.len(),
+        abdications = plan.abdications.len(),
+        distribution = ?plan.distribution,
+        "computed rebalance plan"
+    );
 
+    if plan.abdications.is_empty() {
+        tracing::info!("cluster is balanced, nothing to do");
+    } else {
         let result = execute_plan(&plan, settle_delay, dry_run).await?;
         tracing::info!(
             succeeded = result.succeeded,
