@@ -31,11 +31,6 @@
     op
     (assoc op :values [(:value op)] :offsets [(:offset op)])))
 
-(defn- offsets-monotonic?
-  "Returns true if the given sequence of offsets is strictly increasing."
-  [offsets]
-  (every? (fn [[a b]] (< a b)) (partition 2 1 offsets)))
-
 (defn- offsets-unique?
   "Returns true if no two offsets in the seq are the same."
   [offsets]
@@ -122,30 +117,26 @@
                        :b-invoke-idx (:invoke-idx b)})))
                 pairs-by-p))
 
-            ;; --- Invariant 3: Per-partition offset monotonicity & uniqueness ---
-            ;; Monotonicity: offsets ordered by history time (op :index) must be
-            ;; strictly increasing. Catches non-chronological offset assignment.
-            ;; Uniqueness: no two produces share the same offset (catches split-brain).
+            ;; --- Invariant 3: Per-partition offset uniqueness ---
+            ;; No two produces share the same offset (catches split-brain).
+            ;; Note: chronological monotonicity (later invocation → higher offset)
+            ;; is NOT checked here because concurrent producers can legitimately
+            ;; receive offsets out of invocation order. The real-time ordering
+            ;; check (invariant 2) handles the correct linearizable constraint.
             produces-by-p (group-by :partition ok-produces)
             consumes-by-p (group-by :partition ok-consumes)
 
-            ;; Offsets in chronological order (by produce op history index)
-            chronological-offsets-by-p
+            all-offsets-by-p
             (into {}
               (map (fn [[p produces]]
                      [p (->> produces
-                             (sort-by :index)
                              (mapcat :offsets)
                              vec)])
                    produces-by-p))
 
-            offset-monotonic-by-p
-            (into {} (map (fn [[p offs]] [p (offsets-monotonic? offs)])
-                          chronological-offsets-by-p))
-
             offset-unique-by-p
             (into {} (map (fn [[p offs]] [p (offsets-unique? offs)])
-                          chronological-offsets-by-p))
+                          all-offsets-by-p))
 
             ;; --- Invariant 4: Consumed ordering + completeness ---
             partition-results
@@ -159,7 +150,6 @@
                        [p {:produced          (count vos)
                            :consumed          (count consumed)
                            :duplicates        dups
-                           :offsets-monotonic? (get offset-monotonic-by-p p true)
                            :offsets-unique?    (get offset-unique-by-p p true)
                            :ordered?          (= consumed
                                                 (vec (take (count consumed) expected)))}]))
@@ -207,7 +197,6 @@
                           :expected  (take 5 (get expected-by-p (:partition op) []))})))
 
             all-ordered?    (every? :ordered? (vals partition-results))
-            all-monotonic?  (every? :offsets-monotonic? (vals partition-results))
             all-unique?     (every? :offsets-unique? (vals partition-results))
             valid?          (and (empty? batch-violations)
                                  (empty? rt-violations)
@@ -216,7 +205,6 @@
                                  (empty? unexpected)
                                  (zero? duplicates)
                                  all-ordered?
-                                 all-monotonic?
                                  all-unique?)]
         {:valid?                  valid?
          :batch-violations        (count batch-violations)
@@ -235,7 +223,6 @@
          :unexpected              (count unexpected)
          :unexpected-values       (take 10 unexpected)
          :in-order?               all-ordered?
-         :offsets-monotonic?      all-monotonic?
          :offsets-unique?         all-unique?}))))
 
 (def next-value (atom 0))
