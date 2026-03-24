@@ -90,6 +90,10 @@ struct Cli {
     /// Seconds to back off from leader election after an abdication.
     #[arg(long, env = "BARKA_ABDICATION_COOLDOWN_SECS", default_value_t = 60)]
     abdication_cooldown_secs: u64,
+
+    /// Leader lease TTL in milliseconds. Default 10000 (10s).
+    #[arg(long, env = "BARKA_LEADER_LEASE_TTL_MS")]
+    leader_lease_ttl_ms: Option<u64>,
 }
 
 impl Cli {
@@ -121,6 +125,7 @@ impl Cli {
             leader_election_prefix: self.leader_election_prefix.clone(),
             topics: self.topics.0.clone(),
             abdication_cooldown_secs: self.abdication_cooldown_secs,
+            leader_lease_ttl_ms: self.leader_lease_ttl_ms,
         }
     }
 

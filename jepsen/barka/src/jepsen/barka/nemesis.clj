@@ -1,7 +1,7 @@
 (ns jepsen.barka.nemesis
-  "Chaos nemesis that forces partition leadership shuffles by sending abdicate
-   commands through the jepsen-gateway. Uses the same abdicate RPC mechanism
-   that the rebalancer uses internally."
+  "Chaos nemeses for barka:
+   - rebalancer-nemesis: forces leadership shuffles via abdicate RPCs
+   - process-nemesis: kills and restarts individual processes or whole nodes"
   (:require [clojure.tools.logging :refer [info warn]]
             [jepsen.nemesis :as nemesis]
             [jepsen.barka.client :as barka]
@@ -57,3 +57,74 @@
               (assoc op :type :info :value :error)))))
 
       (teardown! [this test]))))
+
+(defn- build-restart-opts
+  "Builds the opts map needed by db/restart-role! from the test map."
+  [test node]
+  (let [base-opts (:barka-opts test)
+        log-dir   (get @(:barka-log-dirs test) node)]
+    (assoc base-opts :log-dir {node log-dir})))
+
+(defn process-nemesis
+  "Creates a Jepsen nemesis that kills and restarts barka processes.
+   Handles :kill-produce, :kill-consume, :kill-gateway (single role on random
+   node) and :kill-node (all three roles on a random node)."
+  [opts]
+  (let [processes (:barka-processes opts)]
+    (reify nemesis/Nemesis
+      (setup! [this test] this)
+
+      (invoke! [this test op]
+        (try
+          (let [nodes (:nodes test)
+                node  (rand-nth nodes)
+                do-kill-restart
+                (fn [role]
+                  (let [ropts (build-restart-opts test node)]
+                    (info "nemesis: killing" (name role) "on" node)
+                    (when-let [proc (get-in @processes [node role])]
+                      (db/kill-process! proc)
+                      (swap! processes update node dissoc role))
+                    ;; Brief pause before restart
+                    (Thread/sleep (+ 1000 (rand-int 2000)))
+                    (info "nemesis: restarting" (name role) "on" node)
+                    (db/restart-role! processes ropts node role)))]
+            (case (:f op)
+              :kill-produce
+              (do (do-kill-restart :produce)
+                  (assoc op :type :info :value {:node node :killed :produce}))
+
+              :kill-consume
+              (do (do-kill-restart :consume)
+                  (assoc op :type :info :value {:node node :killed :consume}))
+
+              :kill-gateway
+              (do (do-kill-restart :gateway)
+                  (assoc op :type :info :value {:node node :killed :gateway}))
+
+              :kill-node
+              (do (doseq [role [:gateway :produce :consume]]
+                    (when-let [proc (get-in @processes [node role])]
+                      (info "nemesis: killing" (name role) "on" node)
+                      (db/kill-process! proc)
+                      (swap! processes update node dissoc role)))
+                  (Thread/sleep (+ 1000 (rand-int 2000)))
+                  ;; Restart in dependency order: produce, consume, then gateway
+                  (let [ropts (build-restart-opts test node)]
+                    (doseq [role [:produce :consume :gateway]]
+                      (info "nemesis: restarting" (name role) "on" node)
+                      (db/restart-role! processes ropts node role)))
+                  (assoc op :type :info :value {:node node :killed :all}))))
+          (catch Exception e
+            (warn "process nemesis failed:" (.getMessage e))
+            (assoc op :type :info :value :error))))
+
+      (teardown! [this test]))))
+
+(defn combined-nemesis
+  "Composes the rebalancer nemesis with the process-killer nemesis."
+  [opts]
+  (nemesis/compose
+    {#{:rebalance}                          (rebalancer-nemesis opts)
+     #{:kill-produce :kill-consume
+       :kill-gateway :kill-node}            (process-nemesis opts)}))
