@@ -175,7 +175,9 @@ async fn handle_json_line(state: &mut SessionState, line: &str) -> JsonlResponse
             let value = req.value.unwrap_or_default().into_bytes();
             match tokio::time::timeout(
                 REQUEST_TIMEOUT,
-                state.produce.produce(&req.topic, req.partition, vec![value]),
+                state
+                    .produce
+                    .produce(&req.topic, req.partition, vec![value]),
             )
             .await
             {
