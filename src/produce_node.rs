@@ -44,6 +44,8 @@ pub struct ProduceNodeConfig {
     pub topics: Vec<TopicConfig>,
     /// How long to back off from leader election after an abdication (seconds).
     pub abdication_cooldown_secs: u64,
+    /// Leader lease TTL in milliseconds. None uses the default (10s).
+    pub leader_lease_ttl_ms: Option<u64>,
 }
 
 impl Default for ProduceNodeConfig {
@@ -60,6 +62,7 @@ impl Default for ProduceNodeConfig {
                 partitions: 1,
             }],
             abdication_cooldown_secs: 60,
+            leader_lease_ttl_ms: None,
         }
     }
 }
@@ -258,7 +261,7 @@ impl ProduceNode {
                         namespace,
                         leader_election_prefix: self.config.leader_election_prefix.clone(),
                         s3_config: self.s3_config.clone(),
-                        validity_millis: None,
+                        validity_millis: self.config.leader_lease_ttl_ms,
                     };
                     let leadership = Arc::clone(&state.leadership);
                     let producer = Arc::clone(&state.producer);
