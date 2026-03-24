@@ -85,9 +85,8 @@ fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
     // Produce nodes
     for i in 0..cli.nodes {
         let port = BASE_PRODUCE_PORT + (i as u16);
-        println!("  produce-node {i}: rpc=:{port}");
-        let child = std::process::Command::new(dir.join("produce-node"))
-            .args(["--node-id", &i.to_string()])
+        let mut cmd = std::process::Command::new(dir.join("produce-node"));
+        cmd.args(["--node-id", &i.to_string()])
             .args(["--rpc-port", &port.to_string()])
             .args(["--s3-endpoint", &cli.s3_endpoint])
             .args(["--s3-bucket", &cli.s3_bucket])
@@ -96,7 +95,15 @@ fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
             .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
             .env("RUST_BACKTRACE", "1")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+        if i == 0 {
+            cmd.env("TOKIO_CONSOLE_BIND", "127.0.0.1:6669");
+            println!("  produce-node {i}: rpc=:{port}  console=:6669");
+        } else {
+            cmd.env_remove("TOKIO_CONSOLE_BIND");
+            println!("  produce-node {i}: rpc=:{port}");
+        }
+        let child = cmd
             .spawn()
             .with_context(|| format!("spawn produce-node {i}"))?;
         children.push(child);
@@ -111,6 +118,7 @@ fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
         .args(["--s3-prefix", s3_prefix])
         .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
         .env("RUST_BACKTRACE", "1")
+        .env_remove("TOKIO_CONSOLE_BIND")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()
@@ -126,6 +134,7 @@ fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
         .args(["--interval-secs", "30"])
         .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
         .env("RUST_BACKTRACE", "1")
+        .env_remove("TOKIO_CONSOLE_BIND")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()

@@ -34,10 +34,20 @@ echo "$S3_PREFIX" > "$PREFIX_FILE"
 echo "starting $NUM_NODES produce-nodes + 1 consume-node + 1 rebalancer (s3-prefix=$S3_PREFIX)"
 echo ""
 
+CONSOLE_PORT=6669
+
 for i in $(seq 0 $((NUM_NODES - 1))); do
     rpc_port=$((BASE_PRODUCE_PORT + i))
-    echo "produce-node $i: rpc=:$rpc_port"
 
+    if [ "$i" -eq 0 ]; then
+        echo "produce-node $i: rpc=:$rpc_port  console=:$CONSOLE_PORT"
+        CONSOLE_ENV="TOKIO_CONSOLE_BIND=127.0.0.1:$CONSOLE_PORT"
+    else
+        echo "produce-node $i: rpc=:$rpc_port"
+        CONSOLE_ENV=""
+    fi
+
+    env $CONSOLE_ENV \
     RUST_LOG=barka=info RUST_BACKTRACE=1 \
         ./target/debug/produce-node \
         --node-id "$i" \
