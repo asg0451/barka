@@ -5,6 +5,11 @@ use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::primitives::{ByteStream, SdkBody};
+use aws_smithy_runtime_api::box_error::BoxError;
+use aws_smithy_runtime_api::client::interceptors::Intercept;
+use aws_smithy_runtime_api::client::interceptors::context::BeforeTransmitInterceptorContextMut;
+use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
+use aws_smithy_types::config_bag::ConfigBag;
 use bytes::Bytes;
 
 use std::collections::VecDeque;
@@ -33,6 +38,36 @@ impl Default for S3Config {
     }
 }
 
+/// Interceptor that forces SigV4 to use `UNSIGNED-PAYLOAD` instead of hashing
+/// the request body with SHA-256. Without this, every S3 PUT computes SHA-256
+/// over the entire segment body before uploading — the dominant CPU cost under
+/// load (~74% of produce-node CPU time with 100k-record segments).
+///
+/// Combined with `RequestChecksumCalculation::WhenRequired` on the client, this
+/// means no client-side integrity check on upload bodies. HTTPS provides
+/// transport-level integrity, and S3 computes its own ETag on receipt.
+#[derive(Debug)]
+struct UnsignedPayloadInterceptor;
+
+impl Intercept for UnsignedPayloadInterceptor {
+    fn name(&self) -> &'static str {
+        "UnsignedPayloadInterceptor"
+    }
+
+    fn modify_before_signing(
+        &self,
+        _context: &mut BeforeTransmitInterceptorContextMut<'_>,
+        _runtime_components: &RuntimeComponents,
+        cfg: &mut ConfigBag,
+    ) -> std::result::Result<(), BoxError> {
+        // TODO: replace with builder-level config when the SDK adds a
+        // first-class `payload_signing` option on the S3 client builder.
+        cfg.interceptor_state()
+            .store_put(aws_runtime::auth::PayloadSigningOverride::UnsignedPayload);
+        Ok(())
+    }
+}
+
 /// Build an S3 client. Points at LocalStack when `config.endpoint_url` is set.
 #[tracing::instrument(level = "debug", skip_all)]
 pub async fn build_client(config: &S3Config) -> Client {
@@ -41,7 +76,11 @@ pub async fn build_client(config: &S3Config) -> Client {
         .load()
         .await;
 
-    let mut builder = aws_sdk_s3::config::Builder::from(&sdk_config);
+    let mut builder = aws_sdk_s3::config::Builder::from(&sdk_config)
+        .interceptor(UnsignedPayloadInterceptor)
+        .request_checksum_calculation(
+            aws_smithy_types::checksum_config::RequestChecksumCalculation::WhenRequired,
+        );
     if let Some(ref url) = config.endpoint_url {
         builder = builder.endpoint_url(url).force_path_style(true);
     }

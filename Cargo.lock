@@ -533,7 +533,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aws-config",
+ "aws-runtime",
  "aws-sdk-s3",
+ "aws-smithy-runtime-api",
  "aws-smithy-types",
  "base64",
  "bytes",
