@@ -159,5 +159,4 @@ mod tests {
         assert!(decoded[1].key.is_empty());
         assert_eq!(decoded[1].value.as_ref(), b"val-only");
     }
-
 }

@@ -207,8 +207,7 @@ impl FlushRound {
             "uploading segment to S3",
         );
         let outcome =
-            s3::put_if_absent_stream(s3_client, &self.bucket, &self.key, chunks, total_len)
-                .await?;
+            s3::put_if_absent_stream(s3_client, &self.bucket, &self.key, chunks, total_len).await?;
 
         if outcome == s3::PutOutcome::AlreadyExists {
             anyhow::bail!("segment {} already exists — sequence collision", self.key);
