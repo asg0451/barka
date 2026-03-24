@@ -196,16 +196,19 @@ impl FlushRound {
             rec.offset = compose(self.segment_seq, i as u64);
         }
 
-        let segment = segment::encode(self.epoch, &records);
+        let (chunks, total_len) = segment::encode_gather(self.epoch, &records);
         tracing::debug!(
             key = %self.key,
             bucket = %self.bucket,
             epoch = self.epoch,
             records = records.len(),
-            total_bytes = segment.len(),
+            chunks = chunks.len(),
+            total_bytes = total_len,
             "uploading segment to S3",
         );
-        let outcome = s3::put_if_absent(s3_client, &self.bucket, &self.key, segment).await?;
+        let outcome =
+            s3::put_if_absent_stream(s3_client, &self.bucket, &self.key, chunks, total_len)
+                .await?;
 
         if outcome == s3::PutOutcome::AlreadyExists {
             anyhow::bail!("segment {} already exists — sequence collision", self.key);
