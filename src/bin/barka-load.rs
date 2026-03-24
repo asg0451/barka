@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -231,10 +231,8 @@ fn print_metrics(cli: &Cli, all_metrics: Vec<WorkerMetrics>, actual_duration: Du
     let total_errors: u64 = all_metrics.iter().map(|m| m.errors).sum();
     let total_batches: usize = all_metrics.iter().map(|m| m.latencies.len()).sum();
 
-    let mut all_latencies: Vec<Duration> = all_metrics
-        .into_iter()
-        .flat_map(|m| m.latencies)
-        .collect();
+    let mut all_latencies: Vec<Duration> =
+        all_metrics.into_iter().flat_map(|m| m.latencies).collect();
     all_latencies.sort();
 
     let secs = actual_duration.as_secs_f64();
