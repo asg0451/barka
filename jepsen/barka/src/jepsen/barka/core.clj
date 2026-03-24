@@ -169,32 +169,23 @@
             unexpected      (vec (remove all-possibly-produced all-consumed))
 
             ;; --- Invariant 6: Replay consume validation ---
-            ;; Each :consume-replay returns values from offset 0. They must be
-            ;; a prefix of the expected offset-sorted produce order for that
-            ;; partition (i.e., no reordering or corruption in cached reads).
+            ;; Each :consume-replay reads from offset 0. We check that the
+            ;; values returned contain no unexpected values (values that were
+            ;; never produced as :ok or :info). We can't do a strict prefix
+            ;; match because :info produces may appear in S3 but not in
+            ;; expected-by-p (built from :ok only).
             ok-replays  (->> history
                              (filter #(and (= :consume-replay (:f %))
                                           (= :ok (:type %)))))
-            ;; Build expected order per partition from produces
-            expected-by-p (into {}
-                            (map (fn [[p produces]]
-                                   [p (->> produces
-                                           (mapcat (fn [op]
-                                                     (map vector (:values op) (:offsets op))))
-                                           (sort-by second)
-                                           (mapv first))])
-                                 produces-by-p))
             replay-violations
             (->> ok-replays
                  (remove (fn [op]
-                           (let [p        (:partition op)
-                                 got      (:value op)
-                                 expected (get expected-by-p p [])]
-                             (= got (vec (take (count got) expected))))))
+                           (let [got (set (:value op))]
+                             (every? all-possibly-produced got))))
                  (mapv (fn [op]
                          {:partition (:partition op)
                           :got       (take 5 (:value op))
-                          :expected  (take 5 (get expected-by-p (:partition op) []))})))
+                          :bad       (take 5 (remove all-possibly-produced (:value op)))})))
 
             all-ordered?    (every? :ordered? (vals partition-results))
             all-unique?     (every? :offsets-unique? (vals partition-results))
@@ -305,6 +296,9 @@
         duration        (get opts :duration 30)
         rate            (get opts :rate 50)
         hotspot         (:hotspot-partition opts)
+        _               (when (and hotspot (>= hotspot num-partitions))
+                          (throw (ex-info "hotspot-partition must be < num-partitions"
+                                          {:hotspot hotspot :num-partitions num-partitions})))
         produce-ratio   (get opts :produce-ratio 0.5)
         drain-duration  (max 15 (quot duration 2))
         node-names      (mapv #(str "n" (inc %)) (range n))
