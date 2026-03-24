@@ -95,10 +95,12 @@
 
 (defn db
   "Constructs a Jepsen db that manages barka.
-   Starts three processes per node: produce-node, consume-node, jepsen-gateway."
+   Starts three processes per node: produce-node, consume-node, jepsen-gateway.
+   Expects :run-id and :num-partitions in opts."
   [opts]
-  (let [run-id    (str (UUID/randomUUID))
-        processes (atom {})]
+  (let [run-id         (:run-id opts)
+        num-partitions (get opts :num-partitions 4)
+        processes      (atom {})]
     (reify db/DB
       (setup! [_ test node]
         (wait-for "localstack S3" localstack-s3-ready? 200 10)
@@ -114,15 +116,20 @@
           (info "starting barka" node
                 "produce-rpc=" produce-rpc-port
                 "consume-rpc=" consume-rpc-port
-                "jepsen-gateway=" gw-port)
+                "jepsen-gateway=" gw-port
+                "partitions=" num-partitions)
 
           ;; 1. produce-node
           (let [log-file (java.io.File. (str log-dir "/produce-node.log"))
                 proc     (start-process
                            [(bin-path opts "produce-node")]
                            (merge base-env
-                                  {"BARKA_NODE_ID"  (str idx)
-                                   "BARKA_RPC_PORT" (str produce-rpc-port)})
+                                  {"BARKA_NODE_ID"                   (str idx)
+                                   "BARKA_RPC_PORT"                  (str produce-rpc-port)
+                                   "BARKA_TOPICS"                    (str "default:" num-partitions)
+                                   "BARKA_LEADER_ELECTION_PREFIX"    s3-prefix
+                                   "BARKA_ABDICATION_COOLDOWN_SECS"  "5"
+                                   "BARKA_LEADER_ELECTION_POLL_SECS" "1"})
                            log-file)]
             (info "produce-node" node "logs →" (.getAbsolutePath log-file))
             (swap! processes assoc-in [node :produce] proc))
@@ -149,15 +156,16 @@
           (let [log-file (java.io.File. (str log-dir "/jepsen-gateway.log"))
                 proc     (start-process
                            [(bin-path opts "jepsen-gateway")]
-                           {"BARKA_JEPSEN_LISTEN_ADDR"  (str "127.0.0.1:" gw-port)
-                            "BARKA_CONSUME_RPC_ADDR"    (str "127.0.0.1:" consume-rpc-port)
-                            "BARKA_S3_ENDPOINT"         localstack-endpoint
-                            "BARKA_S3_BUCKET"           "barka"
-                            "BARKA_AWS_REGION"          "us-east-1"
-                            "AWS_ACCESS_KEY_ID"         "test"
-                            "AWS_SECRET_ACCESS_KEY"     "test"
-                            "RUST_LOG"                  "barka=debug"
-                            "RUST_BACKTRACE"            "1"}
+                           {"BARKA_JEPSEN_LISTEN_ADDR"     (str "127.0.0.1:" gw-port)
+                            "BARKA_CONSUME_RPC_ADDR"       (str "127.0.0.1:" consume-rpc-port)
+                            "BARKA_S3_ENDPOINT"            localstack-endpoint
+                            "BARKA_S3_BUCKET"              "barka"
+                            "BARKA_AWS_REGION"             "us-east-1"
+                            "BARKA_LEADER_ELECTION_PREFIX" s3-prefix
+                            "AWS_ACCESS_KEY_ID"            "test"
+                            "AWS_SECRET_ACCESS_KEY"        "test"
+                            "RUST_LOG"                     "barka=debug"
+                            "RUST_BACKTRACE"               "1"}
                            log-file)]
             (info "jepsen-gateway" node "logs →" (.getAbsolutePath log-file))
             (swap! processes assoc-in [node :gateway] proc))

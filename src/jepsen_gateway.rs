@@ -13,8 +13,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
+use crate::leader_election;
+use crate::node::leader_namespace;
 use crate::produce_router::ProduceRouter;
-use crate::rpc::client::ConsumeClient;
+use crate::rpc::client::{ConsumeClient, ProduceClient};
 use crate::s3::S3Config;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -60,19 +62,33 @@ pub async fn serve(
         .await
 }
 
+struct SessionState {
+    produce: ProduceRouter,
+    consume_client: ConsumeClient,
+    s3_client: aws_sdk_s3::Client,
+    bucket: String,
+    leader_election_prefix: Option<String>,
+}
+
 async fn run_session(
     stream: tokio::net::TcpStream,
     consume_rpc_addr: SocketAddr,
     s3_config: S3Config,
     leader_election_prefix: Option<String>,
 ) -> anyhow::Result<()> {
-    let mut produce = ProduceRouter::new(&s3_config, leader_election_prefix).await;
-    let mut consume_client = connect_consume_with_retry(consume_rpc_addr).await?;
+    let s3_client = crate::s3::build_client(&s3_config).await;
+    let mut state = SessionState {
+        produce: ProduceRouter::new(&s3_config, leader_election_prefix.clone()).await,
+        consume_client: connect_consume_with_retry(consume_rpc_addr).await?,
+        s3_client,
+        bucket: s3_config.bucket.clone(),
+        leader_election_prefix,
+    };
     let (reader, mut writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
-        let response = handle_json_line(&mut produce, &mut consume_client, &line).await;
+        let response = handle_json_line(&mut state, &line).await;
         let mut out = serde_json::to_string(&response).unwrap();
         out.push('\n');
         if writer.write_all(out.as_bytes()).await.is_err() {
@@ -140,11 +156,7 @@ struct JsonlResponse {
     error: Option<String>,
 }
 
-async fn handle_json_line(
-    produce: &mut ProduceRouter,
-    consume_client: &mut ConsumeClient,
-    line: &str,
-) -> JsonlResponse {
+async fn handle_json_line(state: &mut SessionState, line: &str) -> JsonlResponse {
     let req: JsonlRequest = match serde_json::from_str(line) {
         Ok(r) => r,
         Err(e) => {
@@ -163,7 +175,7 @@ async fn handle_json_line(
             let value = req.value.unwrap_or_default().into_bytes();
             match tokio::time::timeout(
                 REQUEST_TIMEOUT,
-                produce.produce(&req.topic, req.partition, vec![value]),
+                state.produce.produce(&req.topic, req.partition, vec![value]),
             )
             .await
             {
@@ -201,7 +213,9 @@ async fn handle_json_line(
         "consume" => {
             match tokio::time::timeout(
                 REQUEST_TIMEOUT,
-                consume_client.consume(&req.topic, req.partition, req.offset, req.max),
+                state
+                    .consume_client
+                    .consume(&req.topic, req.partition, req.offset, req.max),
             )
             .await
             {
@@ -243,12 +257,93 @@ async fn handle_json_line(
                 }
             }
         }
+        "abdicate" => handle_abdicate(state, &req).await,
         other => JsonlResponse {
             ok: false,
             offset: None,
             next_offset: None,
             values: None,
             error: Some(format!("unknown op: {other}")),
+        },
+    }
+}
+
+async fn handle_abdicate(state: &SessionState, req: &JsonlRequest) -> JsonlResponse {
+    let namespace = leader_namespace(&req.topic, req.partition);
+    let leader = match leader_election::read_current_leader(
+        &state.s3_client,
+        &state.bucket,
+        &namespace,
+        state.leader_election_prefix.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(l)) => l,
+        Ok(None) => {
+            return JsonlResponse {
+                ok: true,
+                offset: None,
+                next_offset: None,
+                values: None,
+                error: None,
+            };
+        }
+        Err(e) => {
+            return JsonlResponse {
+                ok: false,
+                offset: None,
+                next_offset: None,
+                values: None,
+                error: Some(format!("leader discovery failed: {e}")),
+            };
+        }
+    };
+
+    info!(
+        topic = %req.topic,
+        partition = req.partition,
+        leader_addr = %leader.addr,
+        leader_node_id = leader.node_id,
+        "sending abdicate request"
+    );
+
+    match ProduceClient::connect(leader.addr).await {
+        Ok(client) => match client.abdicate(&req.topic, req.partition).await {
+            Ok(true) => {
+                info!(
+                    topic = %req.topic,
+                    partition = req.partition,
+                    "abdication succeeded"
+                );
+                JsonlResponse {
+                    ok: true,
+                    offset: None,
+                    next_offset: None,
+                    values: None,
+                    error: None,
+                }
+            }
+            Ok(false) => JsonlResponse {
+                ok: true,
+                offset: None,
+                next_offset: None,
+                values: None,
+                error: None,
+            },
+            Err(e) => JsonlResponse {
+                ok: false,
+                offset: None,
+                next_offset: None,
+                values: None,
+                error: Some(format!("abdicate RPC failed: {e}")),
+            },
+        },
+        Err(e) => JsonlResponse {
+            ok: false,
+            offset: None,
+            next_offset: None,
+            values: None,
+            error: Some(format!("connect to leader failed: {e}")),
         },
     }
 }
