@@ -4,7 +4,6 @@ pub mod consume_node;
 pub mod consumer;
 pub mod jepsen_gateway;
 pub mod leader_election;
-pub mod lease;
 pub mod log;
 pub mod log_offset;
 pub mod node;
