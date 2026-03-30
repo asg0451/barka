@@ -7,6 +7,10 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 #[derive(Clone, Debug)]
 struct TopicConfigs(Vec<TopicConfig>);
 
@@ -135,6 +139,10 @@ impl Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // dhat profiler writes on Drop, so it must outlive everything else.
+    #[cfg(feature = "dhat-heap")]
+    let _profiler = dhat::Profiler::new_heap();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_span_events(FmtSpan::CLOSE)
@@ -157,6 +165,15 @@ async fn main() -> anyhow::Result<()> {
     s3::ensure_bucket(&s3_client, &s3_config.bucket).await?;
 
     let node = ProduceNode::new(config, &s3_config).await?;
-    node.serve().await?;
+
+    // SIGTERM handling: serve until signaled, then return so destructors
+    // (including dhat profiler) run cleanly.
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        r = node.serve() => r?,
+        _ = sigterm.recv() => {
+            tracing::info!("received SIGTERM, shutting down");
+        }
+    };
     Ok(())
 }

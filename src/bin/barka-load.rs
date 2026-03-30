@@ -321,7 +321,31 @@ fn shutdown_cluster(children: &mut [Child], samply_wrapped_produce: bool) {
         println!("stopping profiled produce-node (up to 15s for samply profile flush)...");
         terminate_samply_child(&mut children[0], Duration::from_secs(15));
     }
-    // Kill remaining children.
+    // SIGTERM remaining children first so they can flush (dhat, etc.), then
+    // wait briefly, then SIGKILL anything still alive.
+    #[cfg(unix)]
+    for (i, child) in children.iter_mut().enumerate() {
+        if samply_wrapped_produce && i == 0 {
+            continue;
+        }
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    // Give children up to 3s to shut down gracefully.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    for (i, child) in children.iter_mut().enumerate() {
+        if samply_wrapped_produce && i == 0 {
+            continue;
+        }
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // SIGKILL anything still alive.
     for (i, child) in children.iter_mut().enumerate() {
         if samply_wrapped_produce && i == 0 {
             continue;

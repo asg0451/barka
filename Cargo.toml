@@ -28,8 +28,12 @@ http = "0.2"
 lru = "0.16"
 rand = "0.9"
 libc = "0.2"
+dhat = { version = "0.3", optional = true }
 ratatui = "0.29"
 crossterm = "0.28"
+
+[features]
+dhat-heap = ["dhat"]
 
 [build-dependencies]
 capnpc = "0.25"

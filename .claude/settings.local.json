@@ -103,7 +103,8 @@
       "Bash(ps -eo pid,ppid,pgid,comm)",
       "Bash(rustc:*)",
       "Bash(/tmp/signal_test2 2>&1)",
-      "Bash(/tmp/signal_test3 2>&1)"
+      "Bash(/tmp/signal_test3 2>&1)",
+      "Bash(brew list:*)"
     ],
     "additionalDirectories": [
       "~/.claude/projects/-Users-miles-proj-barka/tool-results"
