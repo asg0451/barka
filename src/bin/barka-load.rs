@@ -1,10 +1,12 @@
 #![recursion_limit = "256"]
 
-use std::path::PathBuf;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use barka::leader_election;
@@ -16,6 +18,69 @@ use clap::Parser;
 
 const BASE_PRODUCE_PORT: u16 = 9292;
 const CONSUME_PORT: u16 = 9392;
+
+/// Default S3 object prefix and `--leader-election-prefix` for spawned nodes.
+const DEFAULT_LOAD_PREFIX: &str = "barka-load";
+
+/// Fixed samply `-o` path (current working directory when `barka-load` runs).
+const PROFILE_OUTPUT_GZ: &str = "barka-load-profile.json.gz";
+
+// ---------------------------------------------------------------------------
+// Process-group cleanup: every child gets `process_group(0)` so its PGID
+// equals its PID.  We record PGIDs here so a signal handler can SIGKILL all
+// groups on Ctrl-C / SIGTERM — no orphans regardless of how we exit.
+// ---------------------------------------------------------------------------
+const MAX_CHILDREN: usize = 16;
+#[allow(clippy::declare_interior_mutable_const)]
+static CHILD_PGIDS: [AtomicU32; MAX_CHILDREN] = {
+    const ZERO: AtomicU32 = AtomicU32::new(0);
+    [ZERO; MAX_CHILDREN]
+};
+static CHILD_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn register_child_pgid(pid: u32) {
+    let idx = CHILD_COUNT.fetch_add(1, Ordering::Relaxed);
+    if idx < MAX_CHILDREN {
+        CHILD_PGIDS[idx].store(pid, Ordering::Relaxed);
+    }
+}
+
+#[cfg(unix)]
+#[allow(clippy::needless_range_loop)]
+fn kill_all_child_groups() {
+    let count = CHILD_COUNT.load(Ordering::Relaxed).min(MAX_CHILDREN);
+    for i in 0..count {
+        let pgid = CHILD_PGIDS[i].load(Ordering::Relaxed);
+        if pgid > 0 {
+            unsafe {
+                libc::kill(-(pgid as libc::pid_t), libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+extern "C" fn cleanup_signal_handler(sig: libc::c_int) {
+    kill_all_child_groups();
+    unsafe {
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
+    }
+}
+
+#[cfg(unix)]
+fn install_signal_handlers() {
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            cleanup_signal_handler as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            cleanup_signal_handler as *const () as libc::sighandler_t,
+        );
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "barka-load", version, about = "Barka produce load tester")]
@@ -44,9 +109,17 @@ struct Cli {
     #[arg(long, default_value_t = 1024)]
     record_size: usize,
 
+    /// Concurrent in-flight produce calls per worker thread.
+    #[arg(long, default_value_t = 1)]
+    concurrency: usize,
+
     /// Number of produce nodes to start.
     #[arg(long, default_value_t = 3)]
     nodes: u32,
+
+    /// Run produce-node 0 under `samply record` (writes `barka-load-profile.json.gz` in cwd).
+    #[arg(long)]
+    profile: bool,
 
     /// S3 endpoint URL.
     #[arg(long, default_value = "http://localhost:4566")]
@@ -56,11 +129,11 @@ struct Cli {
     #[arg(long, default_value = "barka")]
     s3_bucket: String,
 
-    /// Skip starting the cluster; requires --s3-prefix.
+    /// Skip starting the cluster (use an already-running cluster on the same prefix).
     #[arg(long)]
     skip_start: bool,
 
-    /// S3 prefix (auto-generated if not provided).
+    /// S3 data prefix and leader-election namespace override [default: barka-load].
     #[arg(long)]
     s3_prefix: Option<String>,
 }
@@ -78,15 +151,31 @@ fn bin_dir() -> Result<PathBuf> {
     Ok(exe.parent().context("exe has no parent dir")?.to_path_buf())
 }
 
-fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
+/// Spawn a command, putting it in its own process group and registering it for
+/// cleanup.  Every child must go through here so the signal handler can reap it.
+fn spawn_in_own_pgroup(cmd: &mut std::process::Command) -> Result<Child> {
+    #[cfg(unix)]
+    cmd.process_group(0);
+    let child = cmd.spawn()?;
+    register_child_pgid(child.id());
+    Ok(child)
+}
+
+fn start_nodes(
+    cli: &Cli,
+    s3_prefix: &str,
+    profile_gz: Option<&Path>,
+) -> Result<(Vec<Child>, bool)> {
     let dir = bin_dir()?;
     let mut children = Vec::new();
+    let mut samply_wrapped_produce = false;
 
     // Produce nodes
     for i in 0..cli.nodes {
         let port = BASE_PRODUCE_PORT + (i as u16);
-        let mut cmd = std::process::Command::new(dir.join("produce-node"));
-        cmd.args(["--node-id", &i.to_string()])
+        println!("  produce-node {i}: rpc=:{port}");
+        let child = std::process::Command::new(dir.join("produce-node"))
+            .args(["--node-id", &i.to_string()])
             .args(["--rpc-port", &port.to_string()])
             .args(["--s3-endpoint", &cli.s3_endpoint])
             .args(["--s3-bucket", &cli.s3_bucket])
@@ -95,15 +184,7 @@ fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
             .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
             .env("RUST_BACKTRACE", "1")
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit());
-        if i == 0 {
-            cmd.env("TOKIO_CONSOLE_BIND", "127.0.0.1:6669");
-            println!("  produce-node {i}: rpc=:{port}  console=:6669");
-        } else {
-            cmd.env_remove("TOKIO_CONSOLE_BIND");
-            println!("  produce-node {i}: rpc=:{port}");
-        }
-        let child = cmd
+            .stderr(std::process::Stdio::inherit())
             .spawn()
             .with_context(|| format!("spawn produce-node {i}"))?;
         children.push(child);
@@ -118,7 +199,6 @@ fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
         .args(["--s3-prefix", s3_prefix])
         .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
         .env("RUST_BACKTRACE", "1")
-        .env_remove("TOKIO_CONSOLE_BIND")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()
@@ -134,23 +214,127 @@ fn start_nodes(cli: &Cli, s3_prefix: &str) -> Result<Vec<Child>> {
         .args(["--interval-secs", "30"])
         .env("RUST_LOG", std::env::var("RUST_LOG").unwrap_or_default())
         .env("RUST_BACKTRACE", "1")
-        .env_remove("TOKIO_CONSOLE_BIND")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()
         .context("spawn rebalancer")?;
     children.push(child);
 
-    Ok(children)
+    Ok((children, samply_wrapped_produce))
 }
 
-fn kill_children(children: &mut [Child]) {
-    for child in children.iter_mut() {
-        let _ = child.kill();
+/// Stop the samply wrapper by terminating the profiled child underneath it.
+///
+/// samply ignores SIGTERM/SIGINT — it only saves the `-o` profile when
+/// its child process exits.  We find the child (produce-node) via
+/// `pgrep -P`, SIGTERM it, then wait for samply to flush and exit.
+/// Falls back to SIGKILL of the process group.
+fn terminate_samply_child(child: &mut Child, timeout: Duration) {
+    #[cfg(unix)]
+    {
+        let samply_pid = child.id();
+        let grandchildren = child_pids_of(samply_pid);
+        if grandchildren.is_empty() {
+            // samply already exited — group-kill to clean up any orphan.
+            unsafe {
+                libc::kill(-(samply_pid as libc::pid_t), libc::SIGKILL);
+            }
+            let _ = child.wait();
+            return;
+        }
+        for &cpid in &grandchildren {
+            unsafe {
+                libc::kill(cpid as libc::pid_t, libc::SIGTERM);
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {
+                    if Instant::now() > deadline {
+                        unsafe {
+                            libc::kill(-(samply_pid as libc::pid_t), libc::SIGKILL);
+                        }
+                        let _ = child.wait();
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => {
+                    let _ = child.wait();
+                    return;
+                }
+            }
+        }
     }
-    for child in children.iter_mut() {
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
         let _ = child.wait();
     }
+}
+
+fn child_pids_of(parent: u32) -> Vec<u32> {
+    std::process::Command::new("pgrep")
+        .args(["-P", &parent.to_string()])
+        .output()
+        .ok()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.trim().parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn shutdown_cluster(children: &mut [Child], samply_wrapped_produce: bool) {
+    // Orderly samply shutdown: SIGTERM produce-node → samply saves profile → exits.
+    if samply_wrapped_produce {
+        println!("stopping profiled produce-node (up to 15s for samply profile flush)...");
+        terminate_samply_child(&mut children[0], Duration::from_secs(15));
+    }
+    // SIGTERM remaining children first so they can flush (dhat, etc.), then
+    // wait briefly, then SIGKILL anything still alive.
+    #[cfg(unix)]
+    for (i, child) in children.iter_mut().enumerate() {
+        if samply_wrapped_produce && i == 0 {
+            continue;
+        }
+        unsafe {
+            libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    // Give children up to 3s to shut down gracefully.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    for (i, child) in children.iter_mut().enumerate() {
+        if samply_wrapped_produce && i == 0 {
+            continue;
+        }
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = child.try_wait() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    // SIGKILL anything still alive.
+    for (i, child) in children.iter_mut().enumerate() {
+        if samply_wrapped_produce && i == 0 {
+            continue;
+        }
+        let _ = child.kill();
+    }
+    for (i, child) in children.iter_mut().enumerate() {
+        if samply_wrapped_produce && i == 0 {
+            continue;
+        }
+        let _ = child.wait();
+    }
+    // Safety net: SIGKILL every child process group in case anything leaked.
+    #[cfg(unix)]
+    kill_all_child_groups();
 }
 
 async fn wait_for_leaders(
@@ -184,6 +368,17 @@ async fn wait_for_leaders(
     }
 }
 
+/// Poll the stop flag, completing when it becomes true.
+async fn poll_stop(stop: &AtomicBool) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_worker(
     worker_id: usize,
     partition: u32,
@@ -192,6 +387,7 @@ fn run_worker(
     le_prefix: Option<String>,
     batch: Vec<Vec<u8>>,
     stop: Arc<AtomicBool>,
+    concurrency: usize,
 ) -> WorkerMetrics {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -199,39 +395,77 @@ fn run_worker(
         .expect("tokio runtime");
 
     let batch_bytes: u64 = batch.iter().map(|v| v.len() as u64).sum();
-    let mut metrics = WorkerMetrics {
-        records_produced: 0,
-        bytes_produced: 0,
-        errors: 0,
-        latencies: Vec::with_capacity(4096),
-    };
 
     rt.block_on(async {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let mut router = ProduceRouter::new(&s3_config, le_prefix).await;
+                let mut handles = Vec::with_capacity(concurrency);
+                for _ in 0..concurrency {
+                    let topic = topic.clone();
+                    let s3_config = s3_config.clone();
+                    let le_prefix = le_prefix.clone();
+                    let batch = batch.clone();
+                    let stop = stop.clone();
+                    handles.push(tokio::task::spawn_local(async move {
+                        let mut router = ProduceRouter::new(&s3_config, le_prefix).await;
+                        let mut m = WorkerMetrics {
+                            records_produced: 0,
+                            bytes_produced: 0,
+                            errors: 0,
+                            latencies: Vec::with_capacity(4096),
+                        };
+                        while !stop.load(Ordering::Relaxed) {
+                            let start = Instant::now();
+                            // Cancel in-flight produce when the stop flag is set
+                            // so workers don't get stuck in retry backoff.
+                            let result = tokio::select! {
+                                biased;
+                                r = router.produce(&topic, partition, batch.clone()) => Some(r),
+                                _ = poll_stop(&stop) => None,
+                            };
+                            match result {
+                                Some(Ok(records)) => {
+                                    m.records_produced += records.len() as u64;
+                                    m.bytes_produced += batch_bytes;
+                                    m.latencies.push(start.elapsed());
+                                }
+                                Some(Err(e)) => {
+                                    tracing::warn!(
+                                        worker = worker_id,
+                                        error = %e,
+                                        "produce failed"
+                                    );
+                                    m.errors += 1;
+                                }
+                                None => break,
+                            }
+                        }
+                        m
+                    }));
+                }
 
-                while !stop.load(Ordering::Relaxed) {
-                    let start = Instant::now();
-                    match router.produce(&topic, partition, batch.clone()).await {
-                        Ok(records) => {
-                            let elapsed = start.elapsed();
-                            metrics.records_produced += records.len() as u64;
-                            metrics.bytes_produced += batch_bytes;
-                            metrics.latencies.push(elapsed);
+                let mut agg = WorkerMetrics {
+                    records_produced: 0,
+                    bytes_produced: 0,
+                    errors: 0,
+                    latencies: Vec::new(),
+                };
+                for handle in handles {
+                    match handle.await {
+                        Ok(m) => {
+                            agg.records_produced += m.records_produced;
+                            agg.bytes_produced += m.bytes_produced;
+                            agg.errors += m.errors;
+                            agg.latencies.extend(m.latencies);
                         }
-                        Err(e) => {
-                            tracing::warn!(worker = worker_id, error = %e, "produce failed");
-                            metrics.errors += 1;
-                        }
+                        Err(_) => agg.errors += 1,
                     }
                 }
+                agg
             })
-            .await;
-    });
-
-    metrics
+            .await
+    })
 }
 
 fn print_metrics(cli: &Cli, all_metrics: Vec<WorkerMetrics>, actual_duration: Duration) {
@@ -252,8 +486,11 @@ fn print_metrics(cli: &Cli, all_metrics: Vec<WorkerMetrics>, actual_duration: Du
     println!("=== Load Test Results ===");
     println!("Duration:      {:.1}s", secs);
     println!(
-        "Workers:       {}  Partitions: {}",
-        cli.workers, cli.partitions,
+        "Workers:       {} x {} concurrency ({} connections)  Partitions: {}",
+        cli.workers,
+        cli.concurrency,
+        cli.workers * cli.concurrency,
+        cli.partitions,
     );
     println!("Batch size:    {} x {}B", cli.batch_size, cli.record_size);
     println!("Records:       {total_records}");
@@ -284,29 +521,31 @@ fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    #[cfg(unix)]
+    install_signal_handlers();
+
     let cli = Cli::parse();
 
-    let s3_prefix = match (&cli.s3_prefix, cli.skip_start) {
-        (Some(p), _) => p.clone(),
-        (None, true) => bail!("--s3-prefix is required with --skip-start"),
-        (None, false) => {
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            format!("load-{ts}")
-        }
+    let s3_prefix = cli
+        .s3_prefix
+        .clone()
+        .unwrap_or_else(|| DEFAULT_LOAD_PREFIX.to_string());
+
+    let profile_gz: Option<&Path> = if cli.profile {
+        Some(Path::new(PROFILE_OUTPUT_GZ))
+    } else {
+        None
     };
 
     // -- Start cluster --
-    let mut children = if !cli.skip_start {
+    let (mut children, samply_wrapped_produce) = if !cli.skip_start {
         println!(
             "starting {} produce-nodes + 1 consume-node + 1 rebalancer (s3-prefix={s3_prefix})",
             cli.nodes,
         );
-        start_nodes(&cli, &s3_prefix)?
+        start_nodes(&cli, &s3_prefix, profile_gz)?
     } else {
-        vec![]
+        (vec![], false)
     };
 
     let s3_config = S3Config {
@@ -364,9 +603,10 @@ fn main() -> Result<()> {
     // -- Run load test --
     let stop = Arc::new(AtomicBool::new(false));
 
+    let concurrency = cli.concurrency;
     println!(
-        "starting load test: {} workers, {}s duration",
-        cli.workers, cli.duration,
+        "starting load test: {} workers x {} concurrency, {}s duration",
+        cli.workers, concurrency, cli.duration,
     );
 
     let wall_start = Instant::now();
@@ -390,7 +630,18 @@ fn main() -> Result<()> {
             let stop = stop.clone();
             std::thread::Builder::new()
                 .name(format!("worker-{i}"))
-                .spawn(move || run_worker(i, partition, topic, s3_config, le_prefix, batch, stop))
+                .spawn(move || {
+                    run_worker(
+                        i,
+                        partition,
+                        topic,
+                        s3_config,
+                        le_prefix,
+                        batch,
+                        stop,
+                        concurrency,
+                    )
+                })
                 .expect("spawn worker thread")
         })
         .collect();
@@ -419,7 +670,7 @@ fn main() -> Result<()> {
     // -- Cleanup --
     if !children.is_empty() {
         println!("\nshutting down cluster...");
-        kill_children(&mut children);
+        shutdown_cluster(&mut children, samply_wrapped_produce);
     }
 
     Ok(())

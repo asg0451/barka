@@ -4,3 +4,5 @@ jepsen/barka/store/
 jepsen/barka/target/
 jepsen/barka/.lein-*
 jepsen/barka/.nrepl-port
+barka-load-profile.json.gz
+dhat-heap.json
