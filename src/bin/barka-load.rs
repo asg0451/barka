@@ -38,7 +38,7 @@ static CHILD_PGIDS: [AtomicU32; MAX_CHILDREN] = {
 };
 static CHILD_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-fn register_child_pgid(pid: u32) {
+fn _register_child_pgid(pid: u32) {
     let idx = CHILD_COUNT.fetch_add(1, Ordering::Relaxed);
     if idx < MAX_CHILDREN {
         CHILD_PGIDS[idx].store(pid, Ordering::Relaxed);
@@ -153,22 +153,22 @@ fn bin_dir() -> Result<PathBuf> {
 
 /// Spawn a command, putting it in its own process group and registering it for
 /// cleanup.  Every child must go through here so the signal handler can reap it.
-fn spawn_in_own_pgroup(cmd: &mut std::process::Command) -> Result<Child> {
+fn _spawn_in_own_pgroup(cmd: &mut std::process::Command) -> Result<Child> {
     #[cfg(unix)]
     cmd.process_group(0);
     let child = cmd.spawn()?;
-    register_child_pgid(child.id());
+    _register_child_pgid(child.id());
     Ok(child)
 }
 
 fn start_nodes(
     cli: &Cli,
     s3_prefix: &str,
-    profile_gz: Option<&Path>,
+    _profile_gz: Option<&Path>,
 ) -> Result<(Vec<Child>, bool)> {
     let dir = bin_dir()?;
     let mut children = Vec::new();
-    let mut samply_wrapped_produce = false;
+    let samply_wrapped_produce = false;
 
     // Produce nodes
     for i in 0..cli.nodes {
